@@ -97,13 +97,13 @@ function launch {
     echo "Flask already installed."
   else
     echo "Flask installing."
-    pip install flask
+    timeout 90 pip install flask >/tmp/flask_install.log 2>&1 || echo "Flask install skipped (network/timeout)."
   fi
   if python -c "import shapely" > /dev/null 2>&1; then
     echo "shapely already installed."
   else
     echo "shapely installing."
-    pip install shapely
+    timeout 90 pip install shapely >/tmp/shapely_install.log 2>&1 || echo "shapely install skipped (network/timeout)."
   fi
 
   # events language init
