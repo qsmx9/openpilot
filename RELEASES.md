@@ -1,3 +1,9 @@
+Carrot2-v9 (2026-09-07)
+========================
+* 开机加速：合并 weston 启动前置命令。原厂 weston.service 的 8 条 ExecStartPre 每条都要单独 fork/exec 一个 shell，实测累计 1.710 秒；合并为 2 条（python 一条、shell 一条）后实测 0.314 秒，开机第一屏到第二屏缩短约 1.4 秒。8 条命令的内容、参数、执行顺序完全不变，仅减少 6 次多余的进程创建开销，且不改变任何失败语义（原带 || true 的仍带 || true）
+* 采用 systemd drop-in 覆盖（/etc/systemd/system/weston.service.d/10-merge-execstartpre.conf）：不改动 /usr 下任何原厂文件，AGNOS 升级不受影响；删除该 conf 文件后执行 systemctl daemon-reload 即可完整回滚到原厂 8 条，无需重刷系统
+* 新增 system/agnos/weston-execstartpre-merge.conf：该加速配置的源文件，内含安装与回滚命令说明，刷机或换设备后可一键套用（需先 mount -o remount,rw / 再写入）
+
 Carrot2-v9 (2026-09-04)
 ========================
 * 修复转弯不减速：移除弯道限速平滑限幅（该限幅 8km/h/s 使直路限速 250 降到弯道速度 50 需 25 秒，远超模型约 2 秒前瞻，导致弯道限速几乎不生效、转弯不减速、路口高速过弯），恢复上游即时响应弯道限速
