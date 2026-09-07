@@ -1452,10 +1452,14 @@ def api_splash_set():
         part_size = os.path.getsize(sp)
     except Exception:
         part_size = 0
-    tmp = '/tmp/splash_upload_' + str(int(time.time() * 1000)) + '.bin'
+    tmp = '/data/splash_upload_' + str(int(time.time() * 1000)) + '.bin'
     try:
         f.save(tmp)
     except Exception as e:
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
         return jsonify({'success': False, 'message': f'保存失败: {e}'})
     # 大小校验：bin 必须与原 splash 分区大小一致，避免写坏分区
     try:
@@ -1483,6 +1487,10 @@ def api_splash_set():
             threading.Thread(target=lambda: (time.sleep(1), subprocess.Popen(['sudo', 'reboot'])), daemon=True).start()
         return jsonify({'success': True, 'message': msg})
     except Exception as e:
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
         return jsonify({'success': False, 'message': f'刷入失败: {e}'})
 
 
