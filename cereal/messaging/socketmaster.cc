@@ -3,6 +3,7 @@
 #include <string>
 #include <mutex>
 
+#include "cereal/gen/cpp/log.capnp.h"
 #include "cereal/services.h"
 #include "cereal/messaging/messaging.h"
 
