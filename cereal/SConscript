@@ -9,6 +9,59 @@ env.Command([f'gen/cpp/{s}.c++' for s in schema_files] + [f'gen/cpp/{s}.h' for s
             schema_files,
             f"capnpc --src-prefix={cereal_dir.path} $SOURCES -o c++:{gen_dir.path}/cpp/")
 
+# --- capnp 生成头完整性自愈 ---
+#
+# gen/cpp/*.capnp.h 是 capnpc 当场生成的构建产物（log.capnp.h 约 2.6MB）。
+# 若生成过程被中断（断电/磁盘满/并发冲突），会残留"文件存在但内容残缺"的 .h。
+# 此时 #include 不会报 file-not-found，而是 namespace cereal 根本没定义，
+# 编译抛出误导性的 "use of undeclared identifier 'cereal'"，且 scons 认为
+# target 已 up-to-date，不会自动重生成，错误会一直卡住。
+#
+# 这里在每次构建前校验；残缺则删除并由 capnpc 重新生成，实现自愈。
+def _capnp_selfheal(target, source, env):
+  import os, subprocess
+
+  src_dir = cereal_dir.abspath            # .../openpilot/cereal
+  out_dir = os.path.join(gen_dir.abspath, 'cpp')  # .../openpilot/cereal/gen/cpp
+
+  def intact(path):
+    try:
+      with open(path, 'rb') as f:
+        data = f.read()
+    except OSError:
+      return False
+    # 完整的 capnp 头必然含 namespace cereal，且体积远大于 1KB
+    return b'namespace cereal' in data and len(data) > 1024
+
+  broken = [s for s in schema_files
+            if not intact(os.path.join(out_dir, s + '.h'))]
+  if broken:
+    print('[cereal] capnp 生成头残缺，正在重新生成: %s' % ', '.join(broken))
+    for s in schema_files:
+      for ext in ('.h', '.c++'):
+        try:
+          os.remove(os.path.join(out_dir, s + ext))
+        except OSError:
+          pass
+    subprocess.check_call(
+      ['capnpc', '--src-prefix=%s' % src_dir] +
+      [os.path.join(src_dir, s) for s in schema_files] +
+      ['-o', 'c++:%s' % out_dir],
+      cwd=src_dir)
+    # 重新生成后再校验一次，仍不完整则让构建失败并给出明确原因
+    still = [s for s in schema_files
+             if not intact(os.path.join(out_dir, s + '.h'))]
+    if still:
+      raise RuntimeError(
+        'capnp 生成头仍然残缺: %s ，请检查 capnpc 是否可用' % ', '.join(still))
+    print('[cereal] capnp 生成头已重新生成完成')
+  return 0
+
+capnp_check = env.Command('capnp_headers_check', [], env.Action(_capnp_selfheal, None))
+env.AlwaysBuild(capnp_check)
+# 保证校验先于任何依赖 capnp 头的编译目标执行
+env.Depends([f'gen/cpp/{s}.h' for s in schema_files], capnp_check)
+
 cereal = env.Library('cereal', [f'gen/cpp/{s}.c++' for s in schema_files])
 
 # Build messaging
