@@ -6,10 +6,15 @@ Import('env', 'arch', 'messaging', 'common', 'visionipc')
 ffmpeg_root = '../../selfdrive/ui/qt/screenrecorder/ffmpeg'
 env['CPPPATH'] += [ffmpeg_root + '/include']
 env['LIBPATH'] = [ffmpeg_root + '/lib'] + env.get('LIBPATH', [])
-env.Append(LINKFLAGS=['-Wl,-rpath,' + ffmpeg_root + '/lib',
-                      '-Wl,-rpath-link,' + ffmpeg_root + '/lib'])
+# rpath 必须是绝对路径(设备路径固定 /data/openpilot): 相对路径按进程 cwd 解析,
+# 仅当 manager 恰以 cwd=system/manager 启动子进程才命中 vendored, 易碎.
+env.Append(LINKFLAGS=['-Wl,-rpath,/data/openpilot/selfdrive/ui/qt/screenrecorder/ffmpeg/lib',
+                      '-Wl,-rpath-link,/data/openpilot/selfdrive/ui/qt/screenrecorder/ffmpeg/lib',
+                      # swresample/x264 强保留为直接 NEEDED(见 ui/SConscript 同款注释)
+                      '-Wl,--no-as-needed'])
 libs = [common, messaging, visionipc,
-        'avformat', 'avcodec', 'avutil', 'swresample', 'x264',
+        'avformat', 'avcodec', 'avutil',
+        'swresample', 'x264',
         'yuv', 'OpenCL', 'pthread', 'zstd']
 
 src = ['logger.cc', 'zstd_writer.cc', 'video_writer.cc', 'encoder/encoder.cc', 'encoder/v4l_encoder.cc', 'encoder/jpeg_encoder.cc']

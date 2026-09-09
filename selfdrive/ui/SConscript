@@ -3,7 +3,8 @@ import json
 Import('qt_env', 'arch', 'common', 'messaging', 'visionipc', 'transformations')
 
 base_libs = [common, messaging, visionipc, transformations,
-             'm', 'OpenCL', 'ssl', 'crypto', 'pthread', 'OmxCore', 'avformat', 'avcodec', 'avutil', 'swresample', 'x264', 'yuv'] + qt_env["LIBS"]
+             'm', 'OpenCL', 'ssl', 'crypto', 'pthread', 'OmxCore', 'avformat', 'avcodec', 'avutil',
+             'swresample', 'x264', 'yuv'] + qt_env["LIBS"]
 
 if arch == 'larch64':
   base_libs.append('EGL')
@@ -104,7 +105,10 @@ ffmpeg_root = "qt/screenrecorder/ffmpeg"
 qt_env['CPPPATH'] += [ffmpeg_root + "/include"]
 qt_env['LIBPATH'] = [ffmpeg_root + "/lib"] + qt_env.get('LIBPATH', [])
 qt_env.Append(LINKFLAGS=['-Wl,-rpath,/data/openpilot/selfdrive/ui/qt/screenrecorder/ffmpeg/lib',
-                          '-Wl,-rpath-link,/data/openpilot/selfdrive/ui/qt/screenrecorder/ffmpeg/lib'])
+                          '-Wl,-rpath-link,/data/openpilot/selfdrive/ui/qt/screenrecorder/ffmpeg/lib',
+                          # 强保留 swresample/x264 为直接 NEEDED(avcodec 的 DT_NEEDED 需运行期解析,
+                          # glibc RUNPATH 不传递给间接依赖; --as-needed 会剥离无直接引用的库)
+                          '-Wl,--no-as-needed'])
 
 
 if GetOption('extras'):

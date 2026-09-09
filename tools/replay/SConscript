@@ -7,6 +7,9 @@ replay_env = env.Clone()
 ffmpeg_root = '../../selfdrive/ui/qt/screenrecorder/ffmpeg'
 replay_env['CPPPATH'] += [ffmpeg_root + '/include']
 replay_env['LIBPATH'] = [ffmpeg_root + '/lib'] + replay_env.get('LIBPATH', [])
+# host 工具, 仓库路径不定: 运行期用 $ORIGIN(相对可执行文件) 而非绝对路径
+replay_env.Append(LINKFLAGS=['-Wl,-rpath,$$ORIGIN/../../selfdrive/ui/qt/screenrecorder/ffmpeg/lib',
+                              '-Wl,--no-as-needed'])
 
 replay_env['CCFLAGS'] += ['-Wno-deprecated-declarations']
 
@@ -22,7 +25,9 @@ replay_lib_src = ["replay.cc", "consoleui.cc", "camera.cc", "filereader.cc", "lo
                   "route.cc", "util.cc", "seg_mgr.cc", "timeline.cc", "api.cc"]
 replay_lib = replay_env.Library("replay", replay_lib_src, LIBS=base_libs, FRAMEWORKS=base_frameworks)
 Export('replay_lib')
-replay_libs = [replay_lib, 'avutil', 'avcodec', 'avformat', 'bz2', 'zstd', 'curl', 'yuv', 'ncurses'] + base_libs
+replay_libs = [replay_lib, 'avutil', 'avcodec', 'avformat',
+                'swresample', 'x264',
+                'bz2', 'zstd', 'curl', 'yuv', 'ncurses'] + base_libs
 replay_env.Program("replay", ["main.cc"], LIBS=replay_libs, FRAMEWORKS=base_frameworks)
 
 if GetOption('extras'):
