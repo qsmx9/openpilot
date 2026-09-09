@@ -6,9 +6,10 @@ Import('env', 'arch', 'messaging', 'common', 'visionipc')
 ffmpeg_root = '../../selfdrive/ui/qt/screenrecorder/ffmpeg'
 env['CPPPATH'] += [ffmpeg_root + '/include']
 env['LIBPATH'] = [ffmpeg_root + '/lib'] + env.get('LIBPATH', [])
-env.Append(LINKFLAGS=['-Wl,-rpath,' + ffmpeg_root + '/lib'])
+env.Append(LINKFLAGS=['-Wl,-rpath,' + ffmpeg_root + '/lib',
+                      '-Wl,-rpath-link,' + ffmpeg_root + '/lib'])
 libs = [common, messaging, visionipc,
-        'avformat', 'avcodec', 'avutil',
+        'avformat', 'avcodec', 'avutil', 'swresample', 'x264',
         'yuv', 'OpenCL', 'pthread', 'zstd']
 
 src = ['logger.cc', 'zstd_writer.cc', 'video_writer.cc', 'encoder/encoder.cc', 'encoder/v4l_encoder.cc', 'encoder/jpeg_encoder.cc']

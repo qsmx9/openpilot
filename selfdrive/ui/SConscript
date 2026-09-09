@@ -3,7 +3,7 @@ import json
 Import('qt_env', 'arch', 'common', 'messaging', 'visionipc', 'transformations')
 
 base_libs = [common, messaging, visionipc, transformations,
-             'm', 'OpenCL', 'ssl', 'crypto', 'pthread', 'OmxCore', 'avformat', 'avcodec', 'avutil', 'yuv'] + qt_env["LIBS"]
+             'm', 'OpenCL', 'ssl', 'crypto', 'pthread', 'OmxCore', 'avformat', 'avcodec', 'avutil', 'swresample', 'x264', 'yuv'] + qt_env["LIBS"]
 
 if arch == 'larch64':
   base_libs.append('EGL')
@@ -103,7 +103,8 @@ qt_env['CPPPATH'] += ["qt/screenrecorder/openmax/include/"]
 ffmpeg_root = "qt/screenrecorder/ffmpeg"
 qt_env['CPPPATH'] += [ffmpeg_root + "/include"]
 qt_env['LIBPATH'] = [ffmpeg_root + "/lib"] + qt_env.get('LIBPATH', [])
-qt_env.Append(LINKFLAGS=['-Wl,-rpath,/data/openpilot/selfdrive/ui/qt/screenrecorder/ffmpeg/lib'])
+qt_env.Append(LINKFLAGS=['-Wl,-rpath,/data/openpilot/selfdrive/ui/qt/screenrecorder/ffmpeg/lib',
+                          '-Wl,-rpath-link,/data/openpilot/selfdrive/ui/qt/screenrecorder/ffmpeg/lib'])
 
 
 if GetOption('extras'):
