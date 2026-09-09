@@ -9,11 +9,14 @@
 # 用法: 连上 SSH(或打开终端), 粘贴这一行执行
 #   curl -sL https://cdn.jsdelivr.net/gh/qingsimuxue99/openpilot@CP-Dev/fix_boot.sh | bash
 #
-# 覆盖的文件 (4 个):
+# 覆盖的文件 (3 个):
 #   开机修复: cereal/SConscript
-#   激活相关: selfdrive/carrot/license.py        激活码校验核心
-#             selfdrive/ui/qt/offroad/settings.cc 激活码输入与状态显示
+#   激活相关: selfdrive/ui/qt/offroad/settings.cc 激活码输入与状态显示
 #             common/params_keys.h                CarrotLicStatus/Remain 参数定义
+#
+# 注: 激活校验组件 license.py 已从公开仓库移除, 不再随仓库分发。
+#     本脚本会在更新前把它保存到仓库外私有路径 /data/carrot/license.py,
+#     代码已改为优先读取该路径, 因此更新不会导致已激活设备失效。
 #
 # 设计原则:
 #   1. 优先用 git 完整更新; git 直连超时(国内常见)则走 CDN 逐文件覆盖
@@ -28,7 +31,6 @@ BASE="https://cdn.jsdelivr.net/gh/qingsimuxue99/openpilot@CP-Dev"
 # 需要用仓库版本强制覆盖的文件
 FILES="
 cereal/SConscript
-selfdrive/carrot/license.py
 selfdrive/ui/qt/offroad/settings.cc
 common/params_keys.h
 "
@@ -40,6 +42,22 @@ say "0/5 检查环境"
 [ -d "$DIR" ] || die "找不到 $DIR, 这不是一台正常的 openpilot 设备"
 cd "$DIR" || die "无法进入 $DIR"
 echo "当前版本: $(git rev-parse --short HEAD 2>/dev/null)"
+
+# ---------- 0.5 保住激活校验组件(必须在 git 操作之前!) ----------
+# license.py 已不在仓库里, git reset --hard 会把工作区的它删掉。
+# 提前复制到仓库外私有路径, 代码已改为优先读该路径, 激活功能不受影响。
+if [ -f "$DIR/selfdrive/carrot/license.py" ]; then
+  mkdir -p /data/carrot 2>/dev/null
+  if cp "$DIR/selfdrive/carrot/license.py" /data/carrot/license.py 2>/dev/null; then
+    chmod 700 /data/carrot 2>/dev/null
+    chmod 600 /data/carrot/license.py 2>/dev/null
+    echo "已保存激活校验组件 -> /data/carrot/license.py (仓库外, 不会被更新删除)"
+  else
+    echo "警告: 无法保存激活校验组件, 若更新后提示未激活请联系处理"
+  fi
+elif [ ! -f /data/carrot/license.py ]; then
+  echo "注意: 未找到激活校验组件, 若此前已激活可忽略(激活状态存在设备参数里)"
+fi
 
 # ---------- 1. 优先用 git 完整更新 ----------
 say "1/5 尝试用 git 拉取最新代码 (最多等 90 秒)"

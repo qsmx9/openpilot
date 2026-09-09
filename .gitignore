@@ -105,3 +105,6 @@ Pipfile
 .history
 .ionide
 .vs
+
+# 激活校验组件: 不随公开仓库分发, 私有副本位于 /data/carrot/license.py
+selfdrive/carrot/license.py
