@@ -6,6 +6,11 @@ libs = ['qt_widgets', 'qt_util', 'QMapLibre', common, messaging, cereal, visioni
         'zmq', 'capnp', 'kj', 'm', 'OpenCL', 'ssl', 'crypto', 'pthread', 'json11'] + map_env["LIBS"]
 if arch == 'larch64':
   libs.append(':libEGL_mesa.so.0')
+  # AGNOS 出厂的 libwayland-client.so 开发链可能指向 2015 年古董 0.3.0
+  # (缺 wl_proxy_marshal_flags 等 wayland >=1.20 符号), 而 mesa EGL 需要新版.
+  # 用 soname 精确名 (.so.0) 替代开发链 (-lwayland-client), 始终链入新版.
+  # 必须 insert(0): 单遍链接下, wayland 先于 EGL_mesa 出现才能让 mesa 符号引用解析到新版.
+  libs.insert(0, ':libwayland-client.so.0')
 
 if arch in ['larch64', 'aarch64', 'x86_64']:
   if arch == 'x86_64':
