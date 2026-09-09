@@ -1,6 +1,13 @@
 Import('env', 'arch', 'common', 'messaging', 'visionipc', 'cereal')
 
 replay_env = env.Clone()
+
+# Vendored ffmpeg (shared with selfdrive/ui/qt/screenrecorder/ffmpeg,
+# committed in 43c51f7). host tool, 仅需 CPPATH/LIBPATH.
+ffmpeg_root = '../../selfdrive/ui/qt/screenrecorder/ffmpeg'
+replay_env['CPPPATH'] += [ffmpeg_root + '/include']
+replay_env['LIBPATH'] = [ffmpeg_root + '/lib'] + replay_env.get('LIBPATH', [])
+
 replay_env['CCFLAGS'] += ['-Wno-deprecated-declarations']
 
 base_frameworks = []

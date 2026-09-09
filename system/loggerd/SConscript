@@ -1,5 +1,12 @@
 Import('env', 'arch', 'messaging', 'common', 'visionipc')
 
+
+# Vendored ffmpeg (shared with selfdrive/ui/qt/screenrecorder/ffmpeg,
+# committed in 43c51f7). 不复制, 复用同一目录.
+ffmpeg_root = '../../selfdrive/ui/qt/screenrecorder/ffmpeg'
+env['CPPPATH'] += [ffmpeg_root + '/include']
+env['LIBPATH'] = [ffmpeg_root + '/lib'] + env.get('LIBPATH', [])
+env.Append(LINKFLAGS=['-Wl,-rpath,' + ffmpeg_root + '/lib'])
 libs = [common, messaging, visionipc,
         'avformat', 'avcodec', 'avutil',
         'yuv', 'OpenCL', 'pthread', 'zstd']
