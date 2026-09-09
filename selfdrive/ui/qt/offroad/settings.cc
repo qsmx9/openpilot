@@ -290,12 +290,7 @@ DevicePanel::DevicePanel(SettingsWindow *parent) : ListWidget(parent) {
     // 写临时文件后调用 license.py 校验(避免激活码出现在命令行)
     std::string code_path = "/tmp/carrot_act_code.txt";
     { std::ofstream ofs(code_path); ofs << s; }
-    // 激活校验脚本不随公开仓库分发: 优先设备私有路径 /data/carrot/license.py,
-    // 其次仓库内路径; 两者都不存在时给出明确提示而不是崩溃
-    std::string cmd = "cd /data/openpilot && LIC=/data/carrot/license.py; "
-                      "[ -f \"$LIC\" ] || LIC=selfdrive/carrot/license.py; "
-                      "if [ ! -f \"$LIC\" ]; then echo '激活校验组件未安装'; exit 1; fi; "
-                      "PYTHONPATH=/data/openpilot /usr/local/venv/bin/python \"$LIC\" --check-code " + code_path + " 2>&1";
+    std::string cmd = "cd /data/openpilot && PYTHONPATH=/data/openpilot /usr/local/venv/bin/python selfdrive/carrot/license.py --check-code " + code_path + " 2>&1";
     FILE *fp = popen(cmd.c_str(), "r");
     std::string out;
     if (fp) { char buf[512]; while (fgets(buf, sizeof(buf), fp)) out += buf; pclose(fp); }
