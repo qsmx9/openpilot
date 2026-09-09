@@ -99,6 +99,12 @@ if GetOption('extras'):
   qt_env.Program('tests/test_translations', [asset_obj, 'tests/test_runner.cc', 'tests/test_translations.cc'] + qt_src, LIBS=qt_libs)
 
 qt_env['CPPPATH'] += ["qt/screenrecorder/openmax/include/"]
+# Vendored ffmpeg: self-contained build without system ffmpeg dev packages
+ffmpeg_root = "qt/screenrecorder/ffmpeg"
+qt_env['CPPPATH'] += [ffmpeg_root + "/include"]
+qt_env['LIBPATH'] = [ffmpeg_root + "/lib"] + qt_env.get('LIBPATH', [])
+qt_env.Append(LINKFLAGS=['-Wl,-rpath,/data/openpilot/selfdrive/ui/qt/screenrecorder/ffmpeg/lib'])
+
 
 if GetOption('extras'):
   qt_env.SharedLibrary("qt/python_helpers", ["qt/qt_window.cc"], LIBS=qt_libs)
