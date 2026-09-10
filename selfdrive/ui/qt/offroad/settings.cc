@@ -396,7 +396,8 @@ DevicePanel::DevicePanel(SettingsWindow *parent) : ListWidget(parent) {
                                    "", this);
   addItem(disableUpdatesToggle);
 
-  // --- 设备维护开关：开机编译跳过 ---
+#ifndef CP_PREBUILT
+  // --- 设备维护开关：开机编译跳过（源码版专属；预编译发布版通过 CP_PREBUILT 编译期剔除） ---
   auto skipBuildToggle = new ParamControl("SkipBootBuild", tr("开机编译跳过"),
                                   tr("打开后开机不再重新编译 openpilot，直接跳过编译启动(更省时)。打开会立即重启设备。"),
                                   "", this);
@@ -409,6 +410,7 @@ DevicePanel::DevicePanel(SettingsWindow *parent) : ListWidget(parent) {
     }
   });
   addItem(skipBuildToggle);
+#endif
 
   auto dcamBtn = new ButtonControl(tr("Driver Camera"), tr("PREVIEW"),
                                    tr("Preview the driver facing camera to ensure that driver monitoring has good visibility. (vehicle must be off)"));

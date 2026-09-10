@@ -261,6 +261,10 @@ Export('envCython', 'np_version')
 
 # Qt build environment
 qt_env = env.Clone()
+# CP_PREBUILT=1: 预编译发布模式，编译期剔除源码版专属功能（如"开机编译跳过"开关）
+qt_env['CP_PREBUILT'] = 'CP_PREBUILT' in ARGUMENTS
+if qt_env['CP_PREBUILT']:
+  qt_env.Append(CPPDEFINES=['CP_PREBUILT'])
 qt_modules = ["Widgets", "Gui", "Core", "Network", "Concurrent", "Qml", "QuickWidgets", "Location", "Positioning", "DBus", "Xml"]
 
 qt_libs = []
