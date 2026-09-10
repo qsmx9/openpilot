@@ -21,13 +21,7 @@ from openpilot.common.swaglog import cloudlog
 
 MIN_SPEED_FILTER = 15 * CV.MPH_TO_MS
 MAX_VEL_ANGLE_STD = np.radians(0.25)
-MAX_YAW_RATE_FILTER = np.radians(1.0)  # per second, tightened from 2.0 to require more perfectly straight driving
-
-# 收紧校准学习（防漂移）：要求车辆真正横向居中直行，且只有重大偏移才更新
-# 避免路面 crown / 习惯性偏置行驶 / 缓弯把系统性横向偏置学进校准
-MAX_LAT_RATIO = np.tan(np.radians(0.15))   # 横向/纵向位移比 < 0.15° 当量，才视为真正居中直行
-DEADZONE_YAW = np.radians(0.20)            # yaw 变化 > 0.2° 才写入环形缓冲（重大偏移才学）
-DEADZONE_PITCH = np.radians(0.30)          # pitch 变化 > 0.3° 才写入
+MAX_YAW_RATE_FILTER = np.radians(2.0)  # per second
 
 MAX_HEIGHT_STD = np.exp(-3.5)
 
@@ -130,9 +124,6 @@ class Calibrator:
       self.old_rpy = smooth_from
       self.old_rpy_weight = 1.0
 
-    # 记录已写盘校准，供"写盘收敛"判断（收紧③）
-    self.last_written_rpy = rpy_init.copy()
-
   def get_valid_idxs(self) -> list[int]:
     # exclude current block_idx from validity window
     before_current = list(range(self.block_idx))
@@ -170,13 +161,8 @@ class Calibrator:
       self.reset(self.rpys[self.block_idx - 1], valid_blocks=1, smooth_from=self.rpy)
       self.cal_status = log.LiveCalibrationData.Status.recalibrating
 
-    # 收紧③：写盘收敛——只有校准值真变化了才写回磁盘，避免每 ~4 分钟反复刷同一个值
-    write_this_cycle = (self.idx == 0) and (self.block_idx % (INPUTS_WANTED//5) == 5)
-    if self.param_put and write_this_cycle:
-      changed = (self.last_written_rpy is None) or (np.max(np.abs(self.rpy - self.last_written_rpy)) > np.radians(0.01))
-      if changed:
-        self.params.put_nonblocking("CalibrationParams", self.get_msg(True).to_bytes())
-        self.last_written_rpy = self.rpy.copy()
+    if self.param_put and (self.idx == 0) and (self.block_idx % (INPUTS_WANTED//5) == 0):
+      self.params.put_nonblocking("CalibrationParams", self.get_msg(True).to_bytes())
 
   def handle_v_ego(self, v_ego: float) -> None:
     self.v_ego = v_ego
@@ -196,12 +182,6 @@ class Calibrator:
     self.old_rpy_weight = max(0.0, self.old_rpy_weight - 1/SMOOTH_CYCLES)
 
     straight_and_fast = ((self.v_ego > MIN_SPEED_FILTER) and (trans[0] > MIN_SPEED_FILTER) and (abs(rot[2]) < MAX_YAW_RATE_FILTER))
-    # 收紧①：已标定后，额外要求车辆真正横向居中直行（横向位移相对纵向极小），
-    # 排除路面 crown / 习惯偏置行驶把系统性横向偏置学进校准导致漂移。
-    # 初次学习（valid_blocks < INPUTS_NEEDED）仍用原宽松门限，保证能标出来。
-    if self.valid_blocks >= INPUTS_NEEDED:
-      centered = (trans[0] > 0) and (abs(trans[1] / trans[0]) < MAX_LAT_RATIO)
-      straight_and_fast = straight_and_fast and centered
     angle_std_threshold = MAX_VEL_ANGLE_STD
     height_std_threshold = MAX_HEIGHT_STD
     rpy_certain = np.arctan2(trans_std[1], trans[0]) < angle_std_threshold
@@ -219,19 +199,6 @@ class Calibrator:
                              np.arctan2(trans[1], trans[0])])
     new_rpy = euler_from_rot(rot_from_euler(self.get_smooth_rpy()).dot(rot_from_euler(observed_rpy)))
     new_rpy = sanity_clip(new_rpy)
-
-    # 收紧②（死区）：相对当前校准只有微小变化则忽略，不写入环形缓冲。
-    # → 正常驾驶冻结已存校准；只有单次观测偏离明显（真实支架变动）才学，实现"重大偏移才学习"。
-    # 初次学习时 smooth_rpy≈0，真实偏差远超死区，故仍能从零学满。
-    smooth_rpy = self.get_smooth_rpy()
-    if abs(new_rpy[2] - smooth_rpy[2]) < DEADZONE_YAW and \
-       abs(new_rpy[1] - smooth_rpy[1]) < DEADZONE_PITCH:
-      # 落在死区内：保持当前校准，仅推进计数，不更新缓冲
-      self.idx = (self.idx + 1) % BLOCK_SIZE
-      if self.idx == 0:
-        self.block_idx = (self.block_idx + 1) % INPUTS_WANTED
-        self.valid_blocks = max(self.block_idx, self.valid_blocks)
-      return None
 
     if len(wide_from_device_euler) == 3:
       new_wide_from_device_euler = np.array(wide_from_device_euler)
