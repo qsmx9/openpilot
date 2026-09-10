@@ -6,9 +6,12 @@ Import('env', 'arch', 'messaging', 'common', 'visionipc')
 ffmpeg_root = '../../selfdrive/ui/qt/screenrecorder/ffmpeg'
 env['CPPPATH'] += [ffmpeg_root + '/include']
 env['LIBPATH'] = [ffmpeg_root + '/lib'] + env.get('LIBPATH', [])
-# rpath 必须是绝对路径(设备路径固定 /data/openpilot): 相对路径按进程 cwd 解析,
-# 仅当 manager 恰以 cwd=system/manager 启动子进程才命中 vendored, 易碎.
-env.Append(LINKFLAGS=['-Wl,-rpath,/data/openpilot/selfdrive/ui/qt/screenrecorder/ffmpeg/lib',
+# rpath 用 $ORIGIN(二进制所在目录)相对定位 vendored ffmpeg: 不绑定安装路径,
+# worktree / 异路径构建同样有效.
+# 注意: scons 经 /bin/sh -c 执行命令, 裸 $ORIGIN 会被 shell 当变量展开为空,
+# 必须用 shell 单引号包住; 若不带引号, RUNPATH 会退化成 /qt/... 这种无效路径.
+# rpath-link 仅链接期使用($ORIGIN 在链接期不展开), 保留绝对路径.
+env.Append(LINKFLAGS=['-Wl,-rpath,\'$$ORIGIN/../../selfdrive/ui/qt/screenrecorder/ffmpeg/lib\'',
                       '-Wl,-rpath-link,/data/openpilot/selfdrive/ui/qt/screenrecorder/ffmpeg/lib',
                       # swresample/x264 强保留为直接 NEEDED(见 ui/SConscript 同款注释)
                       '-Wl,--no-as-needed'])

@@ -20,7 +20,7 @@ cabana_env = qt_env.Clone()
 ffmpeg_root = '../../selfdrive/ui/qt/screenrecorder/ffmpeg'
 cabana_env['CPPPATH'] += [ffmpeg_root + '/include']
 cabana_env['LIBPATH'] = [ffmpeg_root + '/lib'] + cabana_env.get('LIBPATH', [])
-cabana_env.Append(LINKFLAGS=['-Wl,-rpath,$$ORIGIN/../../selfdrive/ui/qt/screenrecorder/ffmpeg/lib',
+cabana_env.Append(LINKFLAGS=['-Wl,-rpath,\'$$ORIGIN/../../selfdrive/ui/qt/screenrecorder/ffmpeg/lib\'',
                               '-Wl,--no-as-needed'])
 cabana_libs = [widgets, cereal, messaging, visionipc, replay_lib, 'panda', 'avutil', 'avcodec', 'avformat',
                 'swresample', 'x264',
