@@ -871,7 +871,7 @@ CarrotPanel::CarrotPanel(QWidget* parent, int mode) : QWidget(parent) {
   latLongToggles = new ListWidget(this);
 
   // 舒适跟车/加塞 参数(调节菜单最前)
-  latLongToggles->addItem(new CValueControl("ComfortLongMode", "舒适纵向模式", "舒适纵向总开关。0=原厂(默认,所有舒适化关闭);1=自定义(读取下方全部参数);2=套用本车型推荐预设(现代/大众/特斯拉各不同,其余9种车仅走通用平滑)。想舒适选2,想微调选1。", 0, 2, 1));
+  latLongToggles->addItem(new CValueControl("ComfortLongMode", "舒适纵向模式", "舒适纵向总开关。0=原厂(默认,所有舒适化关闭);1=自定义(读取下方全部参数);2=推荐预设(平滑0.02/0.04,现代恢复8.1舒适手感,大众/特斯拉同享平滑)。想舒适选2,想微调选1。", 0, 2, 1));
   latLongToggles->addItem(new CValueControl("LongAccelSmoothDown", "减速变化率限制 x0.001", "减速/加塞时的加速度变化率上限(x0.001,即值/1000 为 m/s³)。通用层对所有车型生效。调小=减速更缓更柔(加塞不突兀);调大=减速更干脆。默认20(=0.020),各车型均建议从20起按体感微调。", 1, 200, 1));
   latLongToggles->addItem(new CValueControl("LongAccelSmoothUp", "加速变化率限制 x0.001", "加速/起步时的加速度变化率上限(x0.001)。通用层对所有车型生效。调小=起步加速更柔(不蹿);调大=起步更猛。默认40(=0.040),各车型均建议从40起按体感微调。", 1, 400, 1));
   {
