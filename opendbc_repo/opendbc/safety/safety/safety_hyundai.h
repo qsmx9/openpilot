@@ -185,9 +185,11 @@ static void hyundai_rx_hook(const CANPacket_t *to_push) {
 
     bool stock_ecu_detected = (addr == 0x340);
 
-    // If openpilot is controlling longitudinal we need to ensure the radar is turned off
-    // Enforce by checking we don't see SCC12
-    if (hyundai_longitudinal && (addr == 0x421)) {
+    // 雷达SCC车(库斯图/伊兰特等)雷达常激活、SCC12(0x421)恒在 bus0、OP 仅改写其设定点并不禁用雷达,
+    // 若仍检查会被误判 relayMalfunction. 仅对 camera-SCC 车保留该检查(其 SCC12 来自摄像头 bus2,
+    // 由 fwd_hook 封堵转发); 雷达SCC车不再因 SCC12 触发继电器故障(代价: 无"原厂夺回"安全标志,
+    // 但 OP 已死时本就无所谓). 该门控与 fwd_hook 的 !hyundai_longitudinal 封锁互补.
+    if (hyundai_camera_scc && (addr == 0x421)) {
       stock_ecu_detected = true;
     }
     generic_rx_checks(stock_ecu_detected);
@@ -322,9 +324,9 @@ static int hyundai_fwd_hook(int bus_num, int addr) {
         // falsely triggered relayMalfunction. bus_fwd stays -1 (no forward).
       }
       else if(is_scc_msg) {
-        // 库斯图(CUSTIN)等 camera SCC 车型: SCC12 由 cam 原厂发出, 若 OP 停发时转发会导致 panda 检测 relayMalf
-        // 对 camera SCC 车型永久封锁 SCC12 转发, radar SCC 车型(伊兰特等)保持原逻辑
-        if(!hyundai_camera_scc && (now - last_ts_scc12_from_op >= 400000))
+        // 所有 OP 纵向车型(库斯图/伊兰特等): OP 管纵向时永久封锁 SCC12 转发, 防止 OP 静默>400ms 兜底转发原厂 SCC12 触发 relayMalf
+        // (camera_scc 标志已不可靠: 库斯图实为 radar SCC, 去 CAMERA_SCC 修 CAN 后会变 false; 故改用 longitudinal 标志统一封锁)
+        if(!hyundai_longitudinal && (now - last_ts_scc12_from_op >= 400000))
           bus_fwd = 0;
       }
       else if(is_fca_msg) {
