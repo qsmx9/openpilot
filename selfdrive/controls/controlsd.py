@@ -203,6 +203,9 @@ class Controls:
       _spd = max(CS.vEgo, 2.0)
       _firm = min(_gain / (_spd * _spd), _fmax)   # 目标横向加速度~_gain, 曲率上限_fmax
       _firm = max(_firm, _fmin)                   # 下限, 保证是真实转弯
+      # 2026-09-13 低速防猛拐: <15km/h 注入封顶到 _fmin(0.03, 方向盘约64度当量), 温和引导不猛拐
+      if CS.vEgo * CV.MS_TO_KPH < 15.0:
+        _firm = min(_firm, _fmin)
       if CS.leftBlinker and not CS.rightBlinker:
         _sign = -1.0   # 实车验证+latcontrol取负: 负曲率=左转
       elif CS.rightBlinker and not CS.leftBlinker:
