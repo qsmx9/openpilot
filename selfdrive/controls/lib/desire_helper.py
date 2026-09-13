@@ -934,7 +934,8 @@ class DesireHelper:
     elif ( (self.blinkerMode == 0 or not driver_desire_enabled or turn_left_right
            or (self.blinker_turn_intent and driver_desire_enabled)) and
            desire_enabled and ((below_lane_change_speed and not carstate.standstill and self.enable_turn_desires) or self.turn_desire_state
-             or (self.blinker_turn_intent and driver_desire_enabled and v_ego < (self.blinker_turn_intent_speed * CV.KPH_TO_MS) and not carstate.standstill))) and not self.curve_speed_active: #激活转弯控制模式（2026-09-04: 弯道控速进行中不激活, 避免打断入弯减速）
+             or (self.blinker_turn_intent and driver_desire_enabled and self.turn_desire_state
+                 and v_ego < (self.blinker_turn_intent_speed * CV.KPH_TO_MS) and not carstate.standstill))) and not self.curve_speed_active: #激活转弯控制模式（2026-09-04: 弯道控速进行中不激活, 避免打断入弯减速; 2026-09-13: 打灯转弯意图仅当模型自身检测到转弯时才注入, 直路低速打灯不强制拐弯）
       if self.lane_change_state != LaneChangeState.off:
         print(f"---[{time.strftime('%H:%M:%S')}]Desire Turning")
         #if atc_desire_enabled and (fork_left_right or atc_left_right):

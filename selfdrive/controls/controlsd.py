@@ -178,10 +178,19 @@ class Controls:
 
     # 转弯意图加固 v5: 开环朝灯曲率指令(起步直接命令, 不依赖模型振荡)
     # 灯亮+低速+加固: 直接命令朝灯曲率(按车速算目标半径); 车已转入(模型自身已朝灯)则放手让模型/道路主导; 灯灭/超速自然回正
+    # 2026-09-13 转弯意图安全门控: 低速打灯不再无条件强制转弯。
+    # 只有模型自身检测到转弯意图(desireState 左/右之和>0.1, 即前方确有路口/弯道)时才开环注入引导;
+    # 直路上低速打灯(变道警示)保持原车道, 不再无视路牙护栏强行拐弯。
+    # 纯软件门控(仅收紧激活条件), 不动 CAN/输出路径, 不引入新故障面。
+    try:
+      _firm_model_turn = float(self.sm['modelV2'].meta.desireState[1] + self.sm['modelV2'].meta.desireState[2]) > 0.1
+    except Exception:
+      _firm_model_turn = False
     _firm_on = (CC.latActive and not CS.standstill
                 and self.params.get_int("BlinkerTurnIntent")
                 and self.params.get_int("BlinkerTurnIntentFirm")
-                and CS.vEgo < (self.params.get_int("BlinkerTurnIntentSpeed") * CV.KPH_TO_MS))
+                and CS.vEgo < (self.params.get_int("BlinkerTurnIntentSpeed") * CV.KPH_TO_MS)
+                and _firm_model_turn)
     if _firm_on:
       # UI 可调参数(数值÷倍率): 增益20=2.0, 上限12=0.12, 下限3=0.03, 最大转角90°
       def _firm_gi(k, d):
