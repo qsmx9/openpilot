@@ -55,6 +55,14 @@ static const CanMsg HYUNDAI_TX_MSGS[] = {
 static bool hyundai_legacy = false;
 static bool hyundai_cruise_buttons_alt = false;
 
+// ★ 2026-09-17: SCC12(0x421) 的物理来源自适应标志。
+// 判据需要知道"本车 SCC12 天生在哪条总线", 而 hyundai_camera_scc 不可靠:
+// 它由 values.py 车型 flag 与用户参数 HyundaiCameraSCC 共同驱动, 参数被误配为非 0 时,
+// radar-SCC 车(库斯图/伊兰特等, SCC12 常驻 bus0) 会被误判为"原厂 ECU 夺回控制权"。
+// 这里改用物理事实: 只要 bus2 上真的收到过 SCC12, 本车 SCC12 就来自摄像头总线。
+// 该事实不受任何配置影响; 每次 safety init 时重新学习。
+static bool hyundai_scc12_seen_on_bus2 = false;
+
 static uint8_t hyundai_get_counter(const CANPacket_t *to_push) {
   int addr = GET_ADDR(to_push);
 
@@ -133,6 +141,10 @@ static void hyundai_rx_hook(const CANPacket_t *to_push) {
 
   // SCC12 is on bus 2 for camera-based SCC cars, bus 0 on all others
   if (addr == 0x421) {
+    // ★ 记录 SCC12 的物理来源: bus2 上出现 => 本车 SCC12 来自摄像头总线(与配置无关)
+    if (bus == 2) {
+      hyundai_scc12_seen_on_bus2 = true;
+    }
     if (((bus == 0) && !hyundai_camera_scc) || ((bus == 2) && hyundai_camera_scc)) {
       // 2 bits: 13-14
       int cruise_engaged = (GET_BYTES(to_push, 0, 4) >> 13) & 0x3U;
@@ -189,7 +201,14 @@ static void hyundai_rx_hook(const CANPacket_t *to_push) {
     // 若仍检查会被误判 relayMalfunction. 仅对 camera-SCC 车保留该检查(其 SCC12 来自摄像头 bus2,
     // 由 fwd_hook 封堵转发); 雷达SCC车不再因 SCC12 触发继电器故障(代价: 无"原厂夺回"安全标志,
     // 但 OP 已死时本就无所谓). 该门控与 fwd_hook 的 !hyundai_longitudinal 封锁互补.
-    if (hyundai_camera_scc && (addr == 0x421)) {
+    // ★ 2026-09-17: 门控从 hyundai_camera_scc 改为 hyundai_scc12_seen_on_bus2(物理来源)。
+    //   原因: hyundai_camera_scc 会被用户参数 HyundaiCameraSCC 拉高(即使车型本身是 radar-SCC),
+    //   届时 bus0 上常驻的原厂 SCC12 又会被误判 => 继电器故障复现; 且同一参数还会让 RX 表切到
+    //   camera 分支、要求 bus2 有 SCC12 => 同时报 Controls Mismatch(CAN 错误), 形成"两症状往复"。
+    //   改用"bus2 上是否真的出现过 SCC12"后, 本判据与任何配置解耦:
+    //     · radar-SCC 车(bus2 无 SCC12) => 永不因 SCC12 误报, 无论参数怎么配;
+    //     · camera-SCC 车(bus2 确有 SCC12, 50Hz => 20ms 内即置位) => 照旧保留该检查。
+    if (hyundai_scc12_seen_on_bus2 && (addr == 0x421)) {
       stock_ecu_detected = true;
     }
     generic_rx_checks(stock_ecu_detected);
@@ -343,6 +362,9 @@ static int hyundai_fwd_hook(int bus_num, int addr) {
   - legacy(on/off) + camera_scc(allways longitudinal on) + longitudinal(scc off)
 */
 static safety_config hyundai_init_carrot(bool legacy_car) {
+    // ★ 每次 safety init 重新学习 SCC12 的物理来源(见 hyundai_rx_hook)
+    hyundai_scc12_seen_on_bus2 = false;
+
     static const CanMsg HYUNDAI_LONG_TX_MSGS[] = {
       {0x340, 0, 8}, // LKAS11 Bus 0
       {0x4F1, 0, 4}, // CLU11 Bus 0

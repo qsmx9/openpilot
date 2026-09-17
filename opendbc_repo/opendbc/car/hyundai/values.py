@@ -234,10 +234,11 @@ class CAR(Platforms):
     HYUNDAI_ELANTRA.specs,
     flags=HyundaiFlags.LEGACY | HyundaiFlags.CLUSTER_GEARS | HyundaiFlags.MIN_STEER_32_MPH,
   )
+  # ★ 2026-09-17: 伊兰特同为 radar-SCC 车(SCC12 在 bus0), 勿加 HyundaiFlags.CAMERA_SCC。
   HYUNDAI_ELANTRA_2021 = HyundaiPlatformConfig(
     [HyundaiCarDocs("Hyundai Elantra 2021-23", video="https://youtu.be/_EdYQtV52-c", car_parts=CarParts.common([CarHarness.hyundai_k]))],
     CarSpecs(mass=2800 * CV.LB_TO_KG, wheelbase=2.72, steerRatio=12.9, tireStiffnessFactor=0.65),
-    flags=HyundaiFlags.CHECKSUM_CRC8,
+    flags=HyundaiFlags.CHECKSUM_CRC8,   # radar-SCC; 勿加 CAMERA_SCC
   )
   HYUNDAI_ELANTRA_HEV_2021 = HyundaiPlatformConfig(
     [HyundaiCarDocs("Hyundai Elantra Hybrid 2021-23", video="https://youtu.be/_EdYQtV52-c",
@@ -442,10 +443,15 @@ class CAR(Platforms):
     # weight from Limited trim - the only supported trim, steering ratio according to Hyundai News https://www.hyundainews.com/assets/documents/original/48035-2022SantaCruzProductGuideSpecsv2081521.pdf
     CarSpecs(mass=1870, wheelbase=3, steerRatio=14.2),
   )
+  # ★ 2026-09-17: 库斯图是 radar-SCC 车 —— SCC12(0x421) 由前雷达在 bus0 常驻发送。
+  #   ⛔ 绝不可在此加 HyundaiFlags.CAMERA_SCC: 一旦加上, panda 的 hyundai_init_carrot() 会切到
+  #   camera 分支并要求 SCC12 出现在 bus2(库斯图在 bus0) => 永久 rxInvalid => Controls Mismatch(CAN 错误);
+  #   同时 bus0 上常驻的原厂 SCC12 会被判为"原厂夺回" => 继电器故障。两者会同时出现。
+  #   (2026-09-12 的 64fc3286f 就是这样改坏的, 已于 d4250ba14 撤销。)
   HYUNDAI_CUSTIN_1ST_GEN = HyundaiPlatformConfig(
     [HyundaiCarDocs("Hyundai Custin 2023", "All", car_parts=CarParts.common([CarHarness.hyundai_k]))],
     CarSpecs(mass=1690, wheelbase=3.055, steerRatio=17),  # mass: from https://www.hyundai-motor.com.tw/clicktobuy/custin#spec_0, steerRatio: from learner
-    flags=HyundaiFlags.CHECKSUM_CRC8,
+    flags=HyundaiFlags.CHECKSUM_CRC8,   # radar-SCC; 勿加 CAMERA_SCC(见上)
   )
   HYUNDAI_CASPER = HyundaiPlatformConfig(
     [HyundaiCarDocs("Hyundai Casper 2023", "All", car_parts=CarParts.common([CarHarness.hyundai_k]))],

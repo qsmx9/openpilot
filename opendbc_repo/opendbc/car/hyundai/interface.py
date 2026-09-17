@@ -33,7 +33,13 @@ class CarInterface(CarInterfaceBase):
     camera_scc = params.get_int("HyundaiCameraSCC")
     if camera_scc > 0:
       ret.flags |= HyundaiFlags.CAMERA_SCC.value
-      print("$$$CAMERA_SCC toggled...")
+      print(f"$$$CAMERA_SCC toggled by param HyundaiCameraSCC={camera_scc} (car flags=0x{ret.flags:x})")
+    else:
+      # ★ 2026-09-17: 打印关闭态, 便于现场 grep '$$$CAMERA_SCC' 一条日志判定本车 SCC 来源配置。
+      # 注意: 该参数为非 0 时, panda 侧 RX 表会切到 camera 分支并要求 SCC12 出现在 bus2;
+      # 若本车实际是 radar-SCC(SCC12 在 bus0), 会永久 rxInvalid => Controls Mismatch(CAN 错误)。
+      # 库斯图/伊兰特等雷达 SCC 车必须保持 0。
+      print(f"$$$CAMERA_SCC off (param HyundaiCameraSCC={camera_scc}, car flags=0x{ret.flags:x})")
 
     ret.brand = "hyundai"
 
