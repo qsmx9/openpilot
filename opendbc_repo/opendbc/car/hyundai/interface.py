@@ -31,7 +31,33 @@ class CarInterface(CarInterfaceBase):
 
     params = Params()
     camera_scc = params.get_int("HyundaiCameraSCC")
-    if camera_scc > 0:
+
+    # ★ 2026-09-18 物理事实闸门: HyundaiCameraSCC 只对 CANFD 车生效。
+    #   该参数三档语义(1 Long-con / 2 Cruise State Sync / 3 Stock Cruise)全部是 CANFD 场景;
+    #   传统 CAN 车的纵向由 EnableRadarTracks(>0 或 -2) 负责, 不该再借本参数。
+    #   不设闸门时, 一个被污染的参数会同时点着四个症状:
+    #     1) ret.flags |= CAMERA_SCC -> panda safetyParam bit8 -> panda RX 表切 camera 分支,
+    #        要求 SCC12 出现在 bus2; 传统 CAN 车的 SCC12 在 bus0 => 永久 rxInvalid
+    #        => 屏幕 Controls Mismatch
+    #     2) panda 侧 stock_ecu_detected 把 bus0 上常驻的原厂 SCC12 当成"原厂 ECU 夺回"
+    #        => 屏幕"继电器故障"(relayMalfunction)
+    #     3) Python 雷达按 CAMERA_SCC 猜总线, 把 SCC11 订到 bus2 => rcp_scc.can_valid 恒 False
+    #        => 屏幕 "CAN Error: Check Connections!!"  (此项已由 2b9cf57 的双总线订阅修复)
+    #     4) cam_can 被硬编码成 1(bus1); camera 分支下巡航状态只认 bus2 的 SCC12
+    #   覆盖: 全部 63 台未标 CAMERA_SCC 的传统 CAN 车(库斯图 CUSTIN_1ST_GEN / 伊兰特 ELANTRA_2021 等)。
+    #   不影响: 33 台 CANFD 车(本参数照旧生效) + 4 台自带 CAMERA_SCC 车型 flag 的传统 CAN 车
+    #          (Kona 2022 / Kona EV 2022 / Casper / Casper EV)。
+    # 仅本变量会被下面的闸门归零；原值 camera_scc 保留给下方纵向开关判断(:218)，
+    # 以免闸门连带改变"非 CANFD 车 + 参数=3(Stock Cruise)"的纵向行为(不该由本修复决定)。
+    camera_scc_effective = camera_scc
+
+    if (camera_scc > 0) and not (ret.flags & HyundaiFlags.CANFD):
+      print("$$$CAMERA_SCC param IGNORED: non-CANFD car (flags=0x%x), HyundaiCameraSCC=%d"
+            " -> CAMERA_SCC flag NOT set, cam_can stays auto; use EnableRadarTracks(>0 or -2) for longitudinal"
+            % (ret.flags, camera_scc))
+      camera_scc_effective = 0
+
+    if camera_scc_effective > 0:
       ret.flags |= HyundaiFlags.CAMERA_SCC.value
       print(f"$$$CAMERA_SCC toggled by param HyundaiCameraSCC={camera_scc} (car flags=0x{ret.flags:x})")
     else:
@@ -43,7 +69,7 @@ class CarInterface(CarInterfaceBase):
 
     ret.brand = "hyundai"
 
-    cam_can = CanBus(None, fingerprint).CAM if camera_scc == 0 else 1
+    cam_can = CanBus(None, fingerprint).CAM if camera_scc_effective == 0 else 1
     hda2 = False #0x50 in fingerprint[cam_can] or 0x110 in fingerprint[cam_can]
     hda2 = hda2 or params.get_int("CanfdHDA2") > 0
     CAN = CanBus(None, fingerprint, hda2)

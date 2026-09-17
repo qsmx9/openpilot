@@ -947,8 +947,6 @@ CarrotPanel::CarrotPanel(QWidget* parent, int mode) : QWidget(parent) {
   //latLongToggles->addItem(new CValueControl("CruiseMinVals", "DECEL:(120)", "Sets the deceleration rate.(x0.01m/s^2)", 50, 250, 5));
 
   dispToggles = new ListWidget(this);
-  dispToggles->addItem(new CValueControl("UIRadarLeadBoxColor", "雷达前车框颜色", "雷达探测到前车时的方框描边,以及画面左侧「雷达距离」数字的底色。0白1红2橙(默认)3黄4绿5青6蓝7紫,8深红9亮红10粉红11玫红12珊瑚13深橙14金15浅黄16米色17卡其18橄榄,19黄绿20草绿21深绿22薄荷23春绿24碧绿25青绿26天蓝27亮天蓝28钢蓝29藏青30靛蓝31紫罗兰32洋红33薰衣草34银灰35深灰。注意:SCC车型的前车(radarTrackId<1)强制显示红色,此项不生效。", 0, 35, 1));
-  dispToggles->addItem(new CValueControl("UIVisionLeadBoxColor", "视觉前车框颜色", "未探测到雷达、仅靠视觉模型识别前车时的方框描边,以及画面右侧「视觉距离」数字的底色。色号同上(0-35),6蓝(默认)。雷达探测到前车时,描边改用「雷达前车框颜色」,此项仅作用于距离标注底色。", 0, 35, 1));
   dispToggles->addItem(new CValueControl("ShowDebugLog", "调试日志", "调试日志位掩码: 1=导航信息, 2=变道请求, 4=变道状态机, 8=变道状态信息。需要多项同时记录就把对应数字相加(如想要导航+变道请求填3)。0=不记录。", 0, 255, 1));
   dispToggles->addItem(new CValueControl("ShowDebugUI", "调试信息", "屏上调试信息显示层级。0=关闭;1=显示基础调试;2=显示更详细调试信息。仅调试用,日常驾驶建议0。", 0, 2, 1));
   dispToggles->addItem(new CValueControl("ShowTpms", "胎压信息", "胎压信息显示。0=不显示;1=显示胎压。", 0, 3, 1));
@@ -1170,19 +1168,7 @@ CarrotPanel::CarrotPanel(QWidget* parent, int mode) : QWidget(parent) {
   featToggles->addItem(new CValueControl("CurveAnticipateDist", "预备前瞻距离(60)m", "往前看多远开始预备降速, 单位m; 越大越早开始减速越柔, 越小越晚", 20, 150, 5));
   featToggles->addItem(new CValueControl("CurveAnticipateLatA", "预备横向加速度(28)x0.1", "由曲率估算弯道限速时用的目标横向加速度, 单位0.1m/s^2; 越大降速越少越晚, 越小降速越多越早(下限由弯道限速兜底, 不会过慢)", 12, 50, 1));
   // === 幽灵刹车抑制（置信度阻尼，独立开关，默认关=零影响原逻辑）===
-  featToggles->addItem(new CValueControl("PhantomBrakeGuardMode", "幽灵刹车抑制(0)", "高速雷达误检假前车导致无故急刹时, 柔和削弱其减速, 绝不删除前车; 0:关闭(完全不影响原逻辑), 1:标准, 2:激进", 0, 2, 1));
-  featToggles->addItem(new CValueControl("PhantomBrakeGuardDist", "触发距离(250)x0.1m", "雷达报前车距离小于此值才进入幽灵判定, 单位0.1m; 越大只在更近的假目标才介入", 50, 600, 10));
-  featToggles->addItem(new CValueControl("PhantomBrakeGuardConfirm", "多帧确认(10)", "连续命中幽灵判定的帧数才生效, 防单帧抖动误杀真实急刹; 越大越保守", 3, 30, 1));
   // === 急刹自动双闪（独立开关，默认关=零影响原逻辑）===
-  featToggles->addItem(sectionHeader("急刹安全警示"));
-  featToggles->addItem(new CValueControl("HazardBrakeMode", "急刹自动双闪(0)", "急减速时自动点亮双闪警示后方来车, 降低追尾风险; 0:关闭(完全不影响原逻辑), 1:急刹触发, 2:急刹+FCW碰撞预警触发", 0, 2, 1));
-  featToggles->addItem(new CValueControl("HazardBrakeAccel", "触发减速度(-35)x0.1", "触发双闪的减速度阈值, 单位0.1m/s^2; 数值越负越难触发(更急的刹才闪), 建议-30~-45", -60, -15, 1));
-  featToggles->addItem(new CValueControl("HazardBrakeRelease", "释放减速度(-15)x0.1", "刹车力度恢复到此值以上才开始计时熄灭(迟滞防抖), 单位0.1m/s^2", -40, -5, 1));
-  featToggles->addItem(new CValueControl("HazardBrakeMinSpeed", "最低触发车速(30)km/h", "低于此车速不触发双闪, 避免市区蠕行/泊车误闪", 0, 120, 5));
-  featToggles->addItem(new CValueControl("HazardBrakeHold", "熄灭延时(15)x0.1s", "减速恢复后双闪再保持的时间, 单位0.1s; 提示后车前方有情况", 5, 50, 1));
-  featToggles->addItem(new CValueControl("HazardBrakeConfirm", "触发确认(3)x0.1s", "持续急刹多久才点亮, 单位0.1s; 防颠簸/单帧噪声误闪", 1, 10, 1));
-  featToggles->addItem(sectionHeader("显示与画面"));
-  featToggles->addItem(new CValueControl("ShowDrivePanel", "驾驶面板", "驾驶面板显示。0=隐藏;1=显示(行车数据面板)。", 0, 1, 1));
   // === 驾驶优化方案 2026-08-03: 前车切出(方案五) ===
   featToggles->addItem(new CValueControl("DynamicTFollowCutOut", "前车切出跟车释放(100)", "前车切出时释放跟车距离的强度(%)。0=关闭,100=最强。注:当前版本此参数预留,可能未实际生效,以实际表现为准。", 0, 100, 5));
   featToggles->addItem(new ParamControl("dp_ui_rainbow", tr("彩虹路径"), tr("将行驶路径显示为彩虹色动态渐变效果"), "", this));
@@ -1206,6 +1192,10 @@ CarrotPanel::CarrotPanel(QWidget* parent, int mode) : QWidget(parent) {
   featToggles->addItem(new CValueControl("CarrotWideCamMode", "广角摄像头模式", "0:自动切换(迟滞速度见下方两项), 1:仅长焦(road主摄), 2:仅广角(wide)", 0, 2, 1));
   featToggles->addItem(new CValueControl("CarrotWideCamSpeedLow", "广角切换速度(28)km/h", "自动模式下, 车速低于此值(单位km/h)时切到广角画面; 需小于[长焦切换速度]以形成迟滞, 防止在边界反复切换", 0, 120, 1));
   featToggles->addItem(new CValueControl("CarrotWideCamSpeedHigh", "长焦切换速度(32)km/h", "自动模式下, 车速高于此值(单位km/h)时切回长焦画面; 需大于[广角切换速度]以形成迟滞", 0, 120, 1));
+
+  // === 前车框颜色(从显示标签迁入功能菜单, 2026-09-18) ===
+  featToggles->addItem(new CValueControl("UIRadarLeadBoxColor", "雷达前车框颜色", "雷达探测到前车时的方框描边,以及画面左侧「雷达距离」数字的底色。0白1红2橙(默认)3黄4绿5青6蓝7紫,8深红9亮红10粉红11玫红12珊瑚13深橙14金15浅黄16米色17卡其18橄榄,19黄绿20草绿21深绿22薄荷23春绿24碧绿25青绿26天蓝27亮天蓝28钢蓝29藏青30靛蓝31紫罗兰32洋红33薰衣草34银灰35深灰。注意:SCC车型的前车(radarTrackId<1)强制显示红色,此项不生效。", 0, 35, 1));
+  featToggles->addItem(new CValueControl("UIVisionLeadBoxColor", "视觉前车框颜色", "未探测到雷达、仅靠视觉模型识别前车时的方框描边,以及画面右侧「视觉距离」数字的底色。色号同上(0-35),6蓝(默认)。雷达探测到前车时,描边改用「雷达前车框颜色」,此项仅作用于距离标注底色。", 0, 35, 1));
 
 
   toggles_layout->addWidget(featToggles);
@@ -1244,7 +1234,6 @@ void CarrotPanel::applyLicenseLock() {
     for (auto* pc : featToggles->findChildren<ParamControl*>()) { Params().putBool(pc->getKey(), false); pc->refresh(); }
     struct IntSet { const char* key; int val; };
     static const IntSet off_int[] = {
-      {"ShowDrivePanel", 0},
       {"CleanViewMode", 0},
       {"AutoScreenDimMode", 0},
       {"AutoScreenDimLevel", 40},

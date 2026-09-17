@@ -195,7 +195,12 @@ class TestHyundaiLegacySafetyHEV(TestHyundaiSafety):
 class TestHyundaiLongitudinalSafety(HyundaiLongitudinalBase, TestHyundaiSafety):
   TX_MSGS = [[0x340, 0], [0x4F1, 0], [0x485, 0], [0x420, 0], [0x421, 0], [0x50A, 0], [0x389, 0], [0x4A2, 0], [0x38D, 0], [0x483, 0], [0x7D0, 0]]
 
-  RELAY_MALFUNCTION_ADDRS = {0: (0x340, 0x421)}  # LKAS11, SCC12
+  # ★ 2026-09-18 期望同步: 本 fork 自 8a8c2ce 起有意改变 bus0 SCC12 的语义 ——
+  #   判据从"看 hyundai_camera_scc 配置"改为"bus2 上是否真的出现过 SCC12"(物理事实)。
+  #   radar-SCC 车(本类模拟的默认场景: 前雷达在 bus0 常驻发 SCC12)不应再因此报继电器故障,
+  #   否则库斯图/伊兰特等 63 台传统 CAN 车会误报(屏幕"继电器故障")。
+  #   上游此处 (0x340, 0x421) 的期望已不适用于本 fork。
+  RELAY_MALFUNCTION_ADDRS = {0: (0x340,)}  # LKAS11 only; SCC12 gated by physical bus-2 detection
 
   DISABLED_ECU_UDS_MSG = (0x7D0, 0)
   DISABLED_ECU_ACTUATION_MSG = (0x421, 0)
