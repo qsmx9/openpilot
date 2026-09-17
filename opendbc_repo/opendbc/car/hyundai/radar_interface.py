@@ -41,18 +41,56 @@ def get_radar_can_parser(CP, radar_tracks, escc, msg_start_addr, msg_count):
   #return CANParser(DBC[CP.carFingerprint][Bus.radar], messages, 1)
     return CANParser('hyundai_kia_mando_front_radar_generated', messages, 1)
 
+class Scc11DualBusParser:
+  """非 CANFD 车的 SCC11(0x420) 解析器：同时订阅 ECAN 与 CAM 两条总线。
+
+  为什么不能只挑一条:
+  旧写法用 `CP.flags & HyundaiFlags.CAMERA_SCC` 猜总线, 而这个 flag 会被用户参数
+  `HyundaiCameraSCC` 打开。一台前雷达发 SCC12 的车(库斯图/伊兰特等)一旦被该参数
+  误设成 camera-SCC, 解析器就会去 bus2 找永远不存在的 SCC11, can_valid 恒为 False
+    -> RadarData.errors.canError=True
+    -> selfdrived 在屏幕上打出「CAN Error: Check Connections!!」。
+  改为两条总线都订阅、以真的收到数据的那条为准 —— 与 safety 层
+  `hyundai_scc12_seen_on_bus2` 完全同一个原则: 看物理事实, 不看配置推导。
+  """
+
+  MESSAGES = (("SCC11", 50),)
+
+  def __init__(self, CP):
+    CAN = CanBus(CP)
+    dbc = DBC[CP.carFingerprint][Bus.pt]
+    self.buses = [CAN.ECAN, CAN.CAM]
+    self.parsers = [CANParser(dbc, list(self.MESSAGES), b) for b in self.buses]
+    print(f"$$$rcp_scc: 订阅 SCC11 于 bus{self.buses}, 取真有数据者 (不再依赖 HyundaiCameraSCC)")
+
+  def update(self, can_strings):
+    updated = set()
+    for p in self.parsers:
+      updated |= set(p.update(can_strings))
+    return updated
+
+  @property
+  def can_valid(self):
+    return any(p.can_valid for p in self.parsers)
+
+  @property
+  def vl(self):
+    for p in self.parsers:
+      if p.can_valid:
+        return p.vl
+    return self.parsers[0].vl
+
+
 def get_radar_can_parser_scc(CP):
   CAN = CanBus(CP)
   if CP.flags & HyundaiFlags.CANFD:
     messages = [("SCC_CONTROL", 50)]
-    bus = CAN.ECAN
-  else:
-    messages = [("SCC11", 50)]
-    bus = CAN.ECAN
+    bus = CAN.CAM if CP.flags & HyundaiFlags.CAMERA_SCC else CAN.ECAN
+    print("$$$rcp_scc: CANFD, bus = ", bus)
+    return CANParser(DBC[CP.carFingerprint][Bus.pt], messages, bus)
 
-  print("$$$$$$$$ ECAN = ", CAN.ECAN)
-  bus = CAN.CAM if CP.flags & HyundaiFlags.CAMERA_SCC else bus
-  return CANParser(DBC[CP.carFingerprint][Bus.pt], messages, bus)
+  # 传统 CAN: 本车 SCC11 到底在 ECAN 还是 CAM, 属于物理事实, 由总线数据说了算。
+  return Scc11DualBusParser(CP)
 
 class RadarInterface(RadarInterfaceBase):
   def __init__(self, CP):
@@ -82,7 +120,17 @@ class RadarInterface(RadarInterfaceBase):
     self.updated_tracks = set()
     self.updated_scc = set()
     self.rcp_tracks = get_radar_can_parser(CP, self.radar_tracks, self.enhanced_scc, self.radar_start_addr, self.radar_msg_count)
-    self.rcp_scc = get_radar_can_parser_scc(CP)
+    # ESCC 模式, 或「雷达轨迹 + 传统CAN + 非 camera-SCC」时, bus0 上不再有车辆侧的
+    # SCC11(0x420)(被 OP 自己发出的 SCC11/SCC12, 或雷达轨迹模式取代), 继续订阅会让
+    # 该 CANParser 恒 can_valid=False -> RadarData.errors.canError=True
+    # -> 屏幕「CAN Error: Check Connections!!」。这类配置不建 SCC parser。
+    # (与新版 CP 的 use_scc_parser 防护一致)
+    use_scc_parser = (not self.enhanced_scc and
+                      not (self.radar_tracks and not self.canfd and not (CP.flags & HyundaiFlags.CAMERA_SCC)))
+    self.rcp_scc = get_radar_can_parser_scc(CP) if use_scc_parser else None
+    print(f"$$$use_scc_parser={use_scc_parser} (enhanced_scc={self.enhanced_scc}, "
+          f"radar_tracks={self.radar_tracks}, canfd={self.canfd}, "
+          f"CAMERA_SCC={bool(CP.flags & HyundaiFlags.CAMERA_SCC)})")
     self.trigger_msg_scc = 416 if self.canfd else 0x420
 
     self.trigger_msg_tracks = self.radar_start_addr + self.radar_msg_count - 1
@@ -256,6 +304,9 @@ class RadarInterface(RadarInterfaceBase):
           t_id += 1
 
   def _update_scc(self, updated_messages):
+    if self.rcp_scc is None:
+      # use_scc_parser=False 的配置(ESCC / 雷达轨迹)下没有 SCC parser, 直接跳过
+      return
     cpt = self.rcp_scc.vl
     t_id = SCC_TID
     if self.canfd:

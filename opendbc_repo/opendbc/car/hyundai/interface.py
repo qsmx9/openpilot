@@ -186,10 +186,15 @@ class CarInterface(CarInterfaceBase):
     ret.openpilotLongitudinalControl = alpha_long and ret.alphaLongitudinalAvailable
 
     # carrot, if camera_scc enabled, enable openpilotLongitudinalControl
-    if ret.flags & HyundaiFlags.CAMERA_SCC.value or params.get_int("EnableRadarTracks") > 0:
+    # -2 = VOACC 视觉纵向: 不启用雷达轨迹、不动雷达, 同样接管纵向。
+    #      这样 radar-SCC 车(库斯图/伊兰特等)不必再靠把 HyundaiCameraSCC 设成非 0
+    #      来换取纵向 —— 那个做法会让本车被误判成 camera-SCC 车, 一次性触发
+    #      继电器故障 + Controls Mismatch + CAN Error 三个症状。 (照搬新版 CP 的做法)
+    enable_radar_tracks = params.get_int("EnableRadarTracks")
+    if ret.flags & HyundaiFlags.CAMERA_SCC.value or enable_radar_tracks > 0 or enable_radar_tracks == -2:
       ret.radarUnavailable = False
       ret.openpilotLongitudinalControl = True if camera_scc != 3 else False
-      print(f"$$$OenpilotLongitudinalControl = True, CAMERA_SCC({ret.flags & HyundaiFlags.CAMERA_SCC.value}) or RadarTracks{params.get_int('EnableRadarTracks')}")
+      print(f"$$$OenpilotLongitudinalControl = True, CAMERA_SCC({ret.flags & HyundaiFlags.CAMERA_SCC.value}) or RadarTracks{enable_radar_tracks}")
     else:
       print(f"$$$OenpilotLongitudinalControl = {alpha_long}")
 
@@ -200,7 +205,7 @@ class CarInterface(CarInterfaceBase):
         ret.radarUnavailable = False
         print(f"$$$RadarTracks disable, Escc enable")
 
-    ret.radarTimeStep = 0.05 if params.get_int("EnableRadarTracks") > 0 or (ret.spFlags & HyundaiFlagsSP.SP_ENHANCED_SCC) else 0.02
+    ret.radarTimeStep = 0.05 if enable_radar_tracks > 0 or (ret.spFlags & HyundaiFlagsSP.SP_ENHANCED_SCC) else 0.02
 
     ret.pcmCruise = not ret.openpilotLongitudinalControl
     ret.startingState = False # True  # carrot
