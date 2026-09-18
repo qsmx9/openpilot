@@ -43,8 +43,11 @@ void ModelRenderer::draw(QPainter &painter, const QRect &surface_rect) {
   const auto &lead_one = radar_state.getLeadOne();
 
   update_model(model, lead_one);
-  drawLaneLines(painter);
-  drawPath(painter, model, surface_rect.height());
+  // 仅开启彩虹时由本 ModelRenderer 画路径/车道线; 关闭时交给 carrot.cc 的 NVG PathDrawer/LaneLineDrawer, 避免双绘
+  if (uiState()->scene.dp_ui_rainbow) {
+    drawLaneLines(painter);
+    drawPath(painter, model, surface_rect.height());
+  }
 
   if (longitudinal_control && sm.alive("radarState")) {
     update_leads(radar_state, model.getPosition());
