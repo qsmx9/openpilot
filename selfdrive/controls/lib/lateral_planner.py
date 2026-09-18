@@ -152,6 +152,11 @@ class LateralPlanner:
     # === 弯道居中（独立模块，独立开关，默认关=零影响）===
     self.path_xyz = self.cc.update(carrot, sm, self.path_xyz, self.LP, measured_curvature, self.v_ego, sm['carState'])
 
+    # === 横向转向平滑(新CP移植): 车道线有效时从几何平滑路径反算yaw/yaw_rate(限幅2.0), laneless保持原始yaw ===
+    if self.lanelines_active:
+      self.plan_yaw, self.plan_yaw_rate = yaw_from_path_no_scipy(
+        self.path_xyz, self.v_plan, smooth_window=5, clip_rate=2.0)
+
     #if self.LP.lanefull_mode:
     #  self.plan_yaw, self.plan_yaw_rate = self.LP.calculate_plan_yaw_and_yaw_rate(self.path_xyz)
 
@@ -309,3 +314,52 @@ class LateralPlanner:
     pm.send('lateralPlan', plan_send)
 
 
+
+def smooth_moving_avg(arr, window=5):
+  if window < 2:
+    return arr
+  if window % 2 == 0:
+    window += 1
+  pad = window // 2
+  arr_pad = np.pad(arr, (pad, pad), mode='edge')
+  kernel = np.ones(window) / window
+  return np.convolve(arr_pad, kernel, mode='same')[pad:-pad]
+
+def yaw_from_path_no_scipy(path_xyz, v_plan, smooth_window=5, clip_rate=2.0, align_first_yaw=None):
+  v0 = float(np.asarray(v_plan)[0]) if len(v_plan) else 0.0
+  if v0 <= 6.0:
+    smooth_window = max(smooth_window, 9)
+  N = path_xyz.shape[0]
+  x = path_xyz[:, 0].astype(float)
+  y = path_xyz[:, 1].astype(float)
+  if N < 5:
+    return np.zeros(N, np.float32), np.zeros(N, np.float32)
+  dx = np.diff(x)
+  dy = np.diff(y)
+  ds_seg = np.sqrt(dx*dx + dy*dy)
+  ds_seg[ds_seg < 0.05] = 0.05
+  s = np.zeros(N, float)
+  s[1:] = np.cumsum(ds_seg)
+  if s[-1] < 0.5:
+    return np.zeros(N, np.float32), np.zeros(N, np.float32)
+  x_smooth = smooth_moving_avg(x, smooth_window)
+  y_smooth = smooth_moving_avg(y, smooth_window)
+  dx_ds  = np.gradient(x_smooth, s)
+  dy_ds  = np.gradient(y_smooth, s)
+  d2x_ds2 = np.gradient(dx_ds, s)
+  d2y_ds2 = np.gradient(dy_ds, s)
+  yaw = np.unwrap(np.arctan2(dy_ds, dx_ds))
+  denom = (dx_ds*dx_ds + dy_ds*dy_ds)**1.5
+  denom[denom < 1e-9] = 1e-9
+  kappa = (dx_ds * d2y_ds2 - dy_ds * d2x_ds2) / denom
+  v = np.asarray(v_plan, float)
+  yaw_rate = kappa * v
+  if v0 <= 6.0:
+    yaw_rate = smooth_moving_avg(yaw_rate, window=7)
+  if align_first_yaw is not None:
+    bias = yaw[0] - float(align_first_yaw)
+    yaw = yaw - bias
+  yaw     = np.where(np.isfinite(yaw), yaw, 0.0)
+  yaw_rate = np.where(np.isfinite(yaw_rate), yaw_rate, 0.0)
+  yaw_rate = np.clip(yaw_rate, -abs(clip_rate), abs(clip_rate))
+  return yaw.astype(np.float32), yaw_rate.astype(np.float32)
