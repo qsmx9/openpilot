@@ -17,7 +17,6 @@
 #include <QShowEvent>
 #include <QMouseEvent>
 #include <QFrame>
-#include <QProcess>
 #include <QNetworkInterface>
 #include <QAbstractSocket>
 
@@ -62,7 +61,6 @@ private slots:
   void toggleSelectAll();
   void deleteSelected();
   void downloadClip(const QString &filename);
-  void downloadSelected();      // 多选打包下载(zip)
   void runAutoClean();
   void updateSelectAllBtnText();
   void toggleSettings();         // 展开/收起清理设置
@@ -82,6 +80,5 @@ private:
   QFrame *setCard = nullptr;       // 清理设置卡片(默认收起)
   QPushButton *setBtn = nullptr;   // 展开/收起按钮
   QPushButton *selAllBtn = nullptr;
-  QPushButton *bundleBtn = nullptr;
   QLabel *statLabel = nullptr;     // 统计信息(数量/占用/剩余)
 };

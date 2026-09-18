@@ -8,8 +8,6 @@ using qrcodegen::QrCode;
 
 // 录像落盘目录, 与 screenrecorder.cc:43 及 fleet.SCREENRECORD_PATH 保持一致
 #define REC_DIR "/data/media/0/videos"
-// 设备内 python(用于 zip 打包, 设备无 zip 命令但有 python zipfile)
-#define DEV_PYTHON "/usr/local/venv/bin/python3"
 
 // 人类可读体积
 static QString fmtSize(qint64 b) {
@@ -140,17 +138,13 @@ ScreenRecordManager::ScreenRecordManager(QWidget *parent) : QWidget(parent) {
   opBar->setContentsMargins(22, 16, 22, 16);
   opBar->setSpacing(18);
   selAllBtn = new QPushButton(tr("全选"), this);
-  bundleBtn = new QPushButton(tr("打包下载"), this);
-  bundleBtn->setObjectName("primary");
   QPushButton *delBtn = new QPushButton(tr("删除选中"), this);
   delBtn->setObjectName("danger");
   QPushButton *refreshBtn = new QPushButton(tr("刷新"), this);
   opBar->addWidget(selAllBtn, 1);
-  opBar->addWidget(bundleBtn, 1);
   opBar->addWidget(delBtn, 1);
   opBar->addWidget(refreshBtn, 1);
   QObject::connect(selAllBtn, &QPushButton::clicked, this, &ScreenRecordManager::toggleSelectAll);
-  QObject::connect(bundleBtn, &QPushButton::clicked, this, &ScreenRecordManager::downloadSelected);
   QObject::connect(delBtn, &QPushButton::clicked, this, &ScreenRecordManager::deleteSelected);
   QObject::connect(refreshBtn, &QPushButton::clicked, this, &ScreenRecordManager::refreshList);
   contentLay->addWidget(opCard);
@@ -348,67 +342,6 @@ void ScreenRecordManager::showQR(const QString &fileOnDisk, const QString &capti
 
 void ScreenRecordManager::downloadClip(const QString &filename) {
   showQR(filename, filename);
-}
-
-// 多选打包下载: 选中多个则打包成 zip(不压缩, 速度=拷贝), 单个则直接下载原文件
-void ScreenRecordManager::downloadSelected() {
-  QStringList sel = selectedClips();
-  if (sel.isEmpty()) {
-    ConfirmationDialog::alert(tr("请先勾选要下载的录像(点整行即可勾选, 可多选)"), this);
-    return;
-  }
-  if (sel.size() == 1) {
-    downloadClip(sel.first());
-    return;
-  }
-
-  QDir dir(REC_DIR);
-  // 清掉上次的包, 避免占用存储堆积
-  for (const QString &old : dir.entryList(QStringList() << "bundle_*.zip" << "bundle_*.tar", QDir::Files)) {
-    QFile::remove(dir.filePath(old));
-  }
-
-  QString ts = QDateTime::currentDateTime().toString("yyyyMMdd-hhmmss");
-  QString zipName = QString("bundle_%1_%2clips.zip").arg(ts).arg(sel.size());
-  QString zipPath = dir.filePath(zipName);
-
-  bundleBtn->setText(tr("打包中..."));
-  bundleBtn->setEnabled(false);
-  QApplication::processEvents();
-
-  // 设备无 zip 命令, 用 python zipfile(ZIP_STORED 不压缩, mp4 本就压不动, 速度≈拷贝)
-  QStringList args;
-  args << "-c"
-       << "import sys,zipfile\n"
-          "z=zipfile.ZipFile(sys.argv[1],'w',zipfile.ZIP_STORED,allowZip64=True)\n"
-          "[z.write(f,f.split('/')[-1]) for f in sys.argv[2:]]\n"
-          "z.close()\n";
-  args << zipPath;
-  for (const QString &f : sel) args << dir.filePath(f);
-  int rc = QProcess::execute(DEV_PYTHON, args);
-
-  QString outName = zipName;
-  if (rc != 0 || !QFile::exists(zipPath)) {
-    // 兜底: python 不可用时用 tar
-    QFile::remove(zipPath);
-    QString tarName = QString("bundle_%1_%2clips.tar").arg(ts).arg(sel.size());
-    QStringList targs;
-    targs << "-cf" << dir.filePath(tarName) << "-C" << REC_DIR;
-    for (const QString &f : sel) targs << f;
-    rc = QProcess::execute("tar", targs);
-    outName = tarName;
-  }
-
-  bundleBtn->setText(tr("打包下载"));
-  bundleBtn->setEnabled(true);
-
-  if (rc != 0 || !QFile::exists(dir.filePath(outName))) {
-    ConfirmationDialog::alert(tr("打包失败, 请改为逐个下载。"), this);
-    return;
-  }
-
-  qint64 sz = QFileInfo(dir.filePath(outName)).size();
-  showQR(outName, tr("%1 个录像已打包 (%2)\n%3").arg(sel.size()).arg(fmtSize(sz)).arg(outName));
 }
 
 void ScreenRecordManager::runAutoClean() {
