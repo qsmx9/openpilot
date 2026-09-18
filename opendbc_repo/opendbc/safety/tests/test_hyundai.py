@@ -242,6 +242,27 @@ class TestHyundaiLongitudinalSafety(HyundaiLongitudinalBase, TestHyundaiSafety):
     self.assertFalse(self._tx(self._accel_msg(0, aeb_decel=1.0)))
 
 
+  def test_disabled_ecu_alive(self):
+    """★ 2026-09-18 期望同步: 本 fork 的 SCC12 判据已改为"物理事实"(bus2 上是否真出现过 SCC12)。
+
+    上游此处期望 bus0 出现 0x421 即报继电器故障; 但那正是本 fork 中
+    "radar-SCC 车(库斯图/伊兰特等)开纵向即持续误报" 的来源, 故已废弃。
+    新语义: 仅当 bus2 上确实出现过 SCC12(真 camera-SCC 车的物理特征)之后,
+    bus0 再出现 0x421 才判为"原厂 ECU 夺回"。
+    """
+    # 1) 未见过 bus2 的 SCC12 => bus0 的 SCC12 不算夺回(radar-SCC 车常态, 库斯图/伊兰特)
+    self.assertFalse(self.safety.get_relay_malfunction())
+    for _ in range(10):
+      self._rx(common.make_msg(0, 0x421, 8))
+    self.assertFalse(self.safety.get_relay_malfunction())
+
+    # 2) 模拟 bus2 上出现过 SCC12(camera-SCC 车特征) => 此时 bus0 的 SCC12 才算夺回
+    self._rx(common.make_msg(2, 0x421, 8))
+    self.safety.set_relay_malfunction(False)
+    self._rx(common.make_msg(0, 0x421, 8))
+    self.assertTrue(self.safety.get_relay_malfunction())
+
+
 class TestHyundaiLongitudinalSafetyCameraSCC(HyundaiLongitudinalBase, TestHyundaiSafety):
   TX_MSGS = [[0x340, 0], [0x4F1, 2], [0x485, 0], [0x420, 0], [0x421, 0], [0x50A, 0], [0x389, 0], [0x4A2, 0]]
 
@@ -276,3 +297,71 @@ class TestHyundaiLongitudinalSafetyCameraSCC(HyundaiLongitudinalBase, TestHyunda
 
 if __name__ == "__main__":
   unittest.main()
+
+
+class TestHyundaiLongitudinalSafetyESCC(common.PandaSafetyTestBase):
+  """★ 2026-09-18: 库斯图场景回归 —— 装 ESCC 模块的 radar-SCC 车。
+
+  车辆特征(硬证据):
+    · 传统 CAN + 前雷达做 SCC(SCC12 物理在 bus0), 无 CAMERA_SCC 车型 flag;
+    · bus0 能检测到 ESCC 报文(0x2AB / BO_ 683 ESCC) 且 EnableEscc=1
+      => Python: spFlags |= SP_ENHANCED_SCC => safetyParam |= ESCC(1024)
+      => panda: hyundai_escc = true。
+
+  为什么必须单独测:
+    上游原判据 "OP 管纵向 => 原厂雷达必须已停用 => 不该再看到 SCC12" 与 ESCC 的
+    设计前提互斥 —— tx_hook 的 0x7D0 门控写成 `!hyundai_escc`, 即 hyundai_escc=true
+    时【放行 UDS, 不停用原厂雷达】; ESCC 模块正是靠改写原厂雷达的设定点工作,
+    雷达被停用就没东西可改。
+    => 该车一开纵向, bus0 上常驻的原厂 SCC12 就 50Hz 命中老判据 => 持续"继电器故障"。
+    这是库斯图报障、而未装 ESCC 的车不报的差异所在。
+
+  本类只做针对性断言, 不继承 TestHyundaiSafety 的全套用例
+  (那套用例因本 fork 的 TX_MSGS 与上游不同步而有既有失败, 与本判据无关)。
+  """
+
+  def setUp(self):
+    self.packer = CANPackerPanda("hyundai_kia_generic")
+    self.safety = libsafety_py.libsafety
+    self.safety.set_safety_hooks(CarParams.SafetyModel.hyundai,
+                                 HyundaiSafetyFlags.LONG | HyundaiSafetyFlags.ESCC)
+    self.safety.init_tests()
+
+  def _set_hooks(self, param):
+    self.safety.set_relay_malfunction(False)
+    self.safety.set_safety_hooks(CarParams.SafetyModel.hyundai, param)
+    self.safety.init_tests()
+
+  def test_escc_car_scc12_on_bus0_does_not_trigger_relay_malfunction(self):
+    """★ 核心回归(库斯图症状): ESCC 车 bus0 常驻原厂 SCC12, 开纵向时不得报继电器故障。
+
+    老判据 `hyundai_longitudinal && addr==0x421` 下, 本断言必然失败(50Hz 误报)。
+    """
+    self.assertFalse(self.safety.get_relay_malfunction())
+    for _ in range(50):
+      self._rx(common.make_msg(0, 0x421, 8))
+    self.assertFalse(self.safety.get_relay_malfunction())
+
+  def test_escc_car_immune_even_after_bus2_scc12_seen(self):
+    """即便 bus2 上出现过 SCC12(异常串扰), "ESCC 且非 camera-SCC" 车仍整体豁免。"""
+    self._rx(common.make_msg(2, 0x421, 8))
+    self.safety.set_relay_malfunction(False)
+    for _ in range(20):
+      self._rx(common.make_msg(0, 0x421, 8))
+    self.assertFalse(self.safety.get_relay_malfunction())
+
+  def test_escc_car_still_reports_lkas11_reclaim(self):
+    """对照(保护未丢): LKAS11(0x340) 的原厂夺回判据对 ESCC 车照旧有效 —— 只摘掉 SCC12 那条。"""
+    self.safety.set_relay_malfunction(False)
+    for _ in range(20):
+      self._rx(common.make_msg(0, 0x340, 8))
+    self.assertTrue(self.safety.get_relay_malfunction())
+
+  def test_non_escc_car_behavior_unchanged(self):
+    """对照(无回归): 非 ESCC 车 + bus2 见过 SCC12 => bus0 的 SCC12 仍然算"原厂夺回"。"""
+    self._set_hooks(HyundaiSafetyFlags.LONG)
+    self._rx(common.make_msg(2, 0x421, 8))
+    self.safety.set_relay_malfunction(False)
+    for _ in range(20):
+      self._rx(common.make_msg(0, 0x421, 8))
+    self.assertTrue(self.safety.get_relay_malfunction())

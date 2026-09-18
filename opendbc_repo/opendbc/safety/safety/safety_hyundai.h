@@ -208,7 +208,19 @@ static void hyundai_rx_hook(const CANPacket_t *to_push) {
     //   改用"bus2 上是否真的出现过 SCC12"后, 本判据与任何配置解耦:
     //     · radar-SCC 车(bus2 无 SCC12) => 永不因 SCC12 误报, 无论参数怎么配;
     //     · camera-SCC 车(bus2 确有 SCC12, 50Hz => 20ms 内即置位) => 照旧保留该检查。
-    if (hyundai_scc12_seen_on_bus2 && (addr == 0x421)) {
+    // ★ 2026-09-18: 追加 ESCC 门控 —— 根治"装 ESCC 的车一开纵向就持续报继电器故障"。
+    //   上游原判据本意是"OP 接管纵向 => 原厂雷达必须已被停用 => 不该再看到 SCC12"
+    //   (上游原文: "If openpilot is controlling longitudinal we need to ensure the radar
+    //    is turned off / Enforce by checking we don't see SCC12")。
+    //   但 ESCC 车的设计前提【恰恰是不要停用原厂雷达】: tx_hook 的 0x7D0 门控 !hyundai_escc
+    //   就是为此放行 UDS 的 —— 雷达必须继续发 SCC12, ESCC 模块才有设定点可改写。
+    //   二者互斥 => 装 ESCC 的 radar-SCC 车(库斯图等)只要开纵向, bus0 上常驻的原厂 SCC12
+    //   就 50Hz 命中该判据 => 屏幕持续"继电器故障"
+    //   (实测: cp-8.31 8/12 与 新cp-0917 9/17 两版固件的判据均为此形态)。
+    //   故: ESCC 车若本身不是 camera-SCC 车(其 SCC12 物理上就在 bus0, 不可能是"夺回"信号),
+    //       整体关闭该判据; camera-SCC 车(含同时装 ESCC 的)照旧保留保护; 其余车行为不变。
+    bool scc12_reclaim_check = hyundai_scc12_seen_on_bus2 && (!hyundai_escc || hyundai_camera_scc);
+    if (scc12_reclaim_check && (addr == 0x421)) {
       stock_ecu_detected = true;
     }
     generic_rx_checks(stock_ecu_detected);
