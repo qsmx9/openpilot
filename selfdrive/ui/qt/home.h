@@ -33,7 +33,7 @@ private:
   Params params;
 
   QTimer* timer;
-  ElidedLabel* version;
+  QLabel* version;
   QStackedLayout* center_layout;
   UpdateAlert *update_widget;
   OffroadAlert* alerts_widget;

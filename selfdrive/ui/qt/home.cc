@@ -1,5 +1,6 @@
 #include "selfdrive/ui/qt/home.h"
 
+#include <QFile>
 #include <QHBoxLayout>
 #include <QMouseEvent>
 #include <QStackedWidget>
@@ -152,8 +153,10 @@ OffroadHome::OffroadHome(QWidget* parent) : QFrame(parent) {
   QObject::connect(alert_notif, &QPushButton::clicked, [=] { center_layout->setCurrentIndex(2); });
   header_layout->addWidget(alert_notif, 0, Qt::AlignHCenter | Qt::AlignLeft);
 
-  version = new ElidedLabel();
-  header_layout->addWidget(version, 0, Qt::AlignHCenter | Qt::AlignRight);
+  version = new QLabel(this);
+  version->setTextFormat(Qt::RichText);
+  version->setStyleSheet("font-size: 48px; font-weight: 600;");
+  header_layout->addWidget(version, 0, Qt::AlignHCenter | Qt::AlignRight | Qt::AlignVCenter);
 
   main_layout->addLayout(header_layout);
 
@@ -216,7 +219,25 @@ void OffroadHome::hideEvent(QHideEvent *event) {
 }
 
 void OffroadHome::refresh() {
-  version->setText(getBrand() + " " +  QString::fromStdString(params.get("UpdaterCurrentDescription")));
+  // 顶部版本条：竖线分段，数据全部来自设备真实信息
+  {
+    QString ver = QString::fromStdString(params.get("Version"));
+    QString branch = QString::fromStdString(params.get("GitBranch"));
+    QString commit = QString::fromStdString(params.get("GitCommit")).left(7);
+    QString model;
+    QFile model_file("/sys/firmware/devicetree/base/model");
+    if (model_file.open(QIODevice::ReadOnly)) {
+      QString raw = QString::fromUtf8(model_file.readAll()).simplified();
+      model = raw.contains("tici", Qt::CaseInsensitive) ? "comma3x" : raw;
+    } else {
+      model = "PC";
+    }
+    QString bdate = QString(__DATE__).simplified();  // e.g. "Sep 19 2026"
+    bdate = bdate.section(' ', 0, 0) + " " + bdate.section(' ', 1, 1);  // "Sep 19"
+    const QString sep = QStringLiteral(" <font color='#555555'>│</font> ");
+    version->setText(QStringLiteral("<font color='#FFFFFF'><b>CarrotPilot %1</b></font>%2<font color='#8FD4F0'>%3</font>%2<font color='#FF9A00'>%4</font>%2<font color='#AAAAAA'>%5</font>%2<font color='#AAAAAA'>%6</font>")
+                     .arg(ver, sep, model, branch, commit, bdate));
+  }
 
   bool updateAvailable = update_widget->refresh();
   int alerts = alerts_widget->refresh();

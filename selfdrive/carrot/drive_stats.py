@@ -1,27 +1,40 @@
 #!/usr/bin/env python3
-"""Drive stats accumulator.
+"""Drive stats accumulator + software RTC fallback.
 
 Runs as a always-on background process. Subscribes to carState and accumulates
-per-trip driving distance / duration / trip count into persistent params so the
-offroad home UI can render a "driving data" panel.
+per-trip driving distance / duration / trip count, then writes a JSON summary
+that the offroad home UI renders as a "driving data" panel.
 
-Data is stored under the ``DriveStats`` param as JSON:
+Data is stored as a plain JSON file (NOT a Params key, to avoid the compiled
+whitelist). The UI reads the same file directly:
   {"today": {km, min, trips}, "week": {...}, "total": {...},
    "daily": {YYYY-MM-DD: km, ...}, "date": YYYY-MM-DD}
 
 Historical data starts from zero (device has no pre-existing odometer feed).
+
+Software RTC fallback (c3 has NO hardware RTC):
+  We persist the last known wall-clock time to CLOCK_TS on /data (which
+  survives power loss). On startup, if the system clock is clearly behind that
+  record (e.g. just booted and reset to 1970), we restore it via `date -s`.
+  While online, systemd-timesyncd keeps the clock accurate and overrides this.
+  This keeps the device showing a sane date/time even offline, like a clock.
 """
 
 import json
+import os
 import time
+import subprocess
 from datetime import date
 
-from openpilot.common.params import Params
-from openpilot.selfdrive.carrot.config import UnifiedParams
-from openpilot.common.realtime import Ratekeeper
 import cereal.messaging as messaging
+from openpilot.common.realtime import Ratekeeper
 
-PARAM = "DriveStats"
+STATS_FILE = "/data/params/d_tmp/drive_stats.json"
+CLOCK_TS = "/data/params/d_tmp/clock.ts"
+# Timestamps below this are considered bogus (1970 epoch, or the AGNOS default
+# bogus date ~2025-06-04). They must never be persisted/restored, or they would
+# poison the software-RTC fallback. 1700000000 == 2023-11-14.
+SANE_EPOCH = 1700000000.0
 SAVE_INTERVAL = 30.0  # seconds
 RATE = 20             # Hz
 
@@ -35,11 +48,16 @@ def _empty_stats():
           "total": _empty_bucket(), "daily": {}, "date": ""}
 
 
-def load_stats(params):
+def _iso_week(d):
+  """Return (iso_year, iso_week) for an ISO-format date string."""
+  return date.fromisoformat(d).isocalendar()[:2]
+
+
+def load_stats():
   try:
-    raw = params.get(PARAM)
-    if raw:
-      d = json.loads(raw)
+    if os.path.exists(STATS_FILE):
+      with open(STATS_FILE, "r") as f:
+        d = json.load(f)
       for k in ("today", "week", "total"):
         if not isinstance(d.get(k), dict):
           d[k] = _empty_bucket()
@@ -52,24 +70,69 @@ def load_stats(params):
   return _empty_stats()
 
 
-def save_stats(params, stats):
+def save_stats(stats):
   try:
-    params.put(PARAM, json.dumps(stats))
+    d = os.path.dirname(STATS_FILE)
+    if d:
+      os.makedirs(d, exist_ok=True)
+    tmp = STATS_FILE + ".tmp"
+    with open(tmp, "w") as f:
+      json.dump(stats, f)
+    os.replace(tmp, STATS_FILE)
+  except Exception:
+    pass
+
+
+def save_clock_ts():
+  """Persist current wall-clock time so it survives power loss."""
+  try:
+    d = os.path.dirname(CLOCK_TS)
+    if d:
+      os.makedirs(d, exist_ok=True)
+    with open(CLOCK_TS, "w") as f:
+      f.write("%.3f" % time.time())
+  except Exception:
+    pass
+
+
+def restore_clock_ts():
+  """If the system clock is clearly behind our last persisted (sane) time,
+  e.g. just booted with no RTC and reset to a bogus default, restore it via
+  `date -s`. This process runs as a non-root user without CAP_SYS_TIME, so we
+  use NOPASSWD sudo. Fails silently when offline/unset; systemd-timesyncd
+  overrides this once NTP syncs."""
+  try:
+    if not os.path.exists(CLOCK_TS):
+      return
+    with open(CLOCK_TS) as f:
+      saved = float(f.read().strip())
+    if saved < SANE_EPOCH:
+      return
+    now = time.time()
+    # Only restore when the clock is clearly behind the record
+    if saved > now + 1.0:
+      subprocess.run(["sudo", "-n", "/bin/date", "-s", "@%d" % int(saved)],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     check=False)
   except Exception:
     pass
 
 
 def main():
-  params = UnifiedParams()
   sm = messaging.SubMaster(['carState'])
   rk = Ratekeeper(RATE, print_delay_threshold=None)
 
-  stats = load_stats(params)
+  stats = load_stats()
   engaged_prev = False
   last_save = 0.0
   last_t = time.monotonic()
   last_date = date.today().isoformat()
+  last_week = _iso_week(last_date) if last_date else None
   stats["date"] = last_date
+
+  # Software RTC: bring the clock back from persisted time if it reset
+  restore_clock_ts()
+  save_clock_ts()  # persist immediately so a fresh boot always has a record
 
   while True:
     sm.update()
@@ -81,23 +144,28 @@ def main():
       cs = sm['carState']
       engaged = cs.controlsAllowed
       v = cs.vEgo  # m/s
+      # distance: only count actual movement while engaged
       if engaged and v > 0.3:
         dist_km = v * dt / 1000.0
         for b in ("today", "week", "total"):
           stats[b]["km"] += dist_km
           stats[b]["min"] += dt / 60.0
-        if not engaged_prev:
-          for b in ("today", "week", "total"):
-            stats[b]["trips"] += 1
-        engaged_prev = True
-      else:
-        engaged_prev = False
+      # trip: count once per engagement session (rising edge of controlsAllowed)
+      if engaged and not engaged_prev:
+        for b in ("today", "week", "total"):
+          stats[b]["trips"] += 1
+      engaged_prev = engaged
 
-    # midnight roll-over: archive today's km into daily[date], reset today
+    # midnight roll-over: archive today's km into daily[date], reset today,
+    # and reset week on ISO week boundary (Monday)
     today = date.today().isoformat()
     if today != last_date:
       if last_date:
         stats["daily"][last_date] = round(stats["today"]["km"], 2)
+        cur_week = _iso_week(today)
+        if last_week is not None and cur_week != last_week:
+          stats["week"] = _empty_bucket()
+        last_week = cur_week
       stats["today"] = _empty_bucket()
       keys = sorted(stats["daily"].keys())
       for k in keys[:-7]:
@@ -106,7 +174,8 @@ def main():
       stats["date"] = today
 
     if now - last_save > SAVE_INTERVAL:
-      save_stats(params, stats)
+      save_stats(stats)
+      save_clock_ts()
       last_save = now
 
     rk.keep_time()
