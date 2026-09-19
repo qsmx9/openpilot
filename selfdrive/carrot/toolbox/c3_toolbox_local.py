@@ -1964,6 +1964,72 @@ def api_scan_lan():
         return jsonify({'success': False, 'message': '扫描失败: %s' % e, 'devices': [], 'subnets': subnets})
 
 
+# ============= 诊断日志 (diagd) =============
+# 读取设备后台诊断守护(diagd.py)产出的故障/错误/进程日志，供网页工具箱展示与分享。
+DIAG_DIR = os.path.join(BASE_DIR, "diag")
+DIAG_FILES = ("errors.log", "latest.json", "report.txt", "daemon.log")
+DIAGD_SCRIPT = "/data/openpilot/selfdrive/carrot/diagd.py"
+
+@app.route('/api/diag')
+def api_diag():
+    """返回诊断快照 + 错误流末尾 + 报告文本，供前端渲染。"""
+    import json as _json
+    res = {"ok": True, "diag_dir": DIAG_DIR}
+    latest = os.path.join(DIAG_DIR, "latest.json")
+    if os.path.isfile(latest):
+        try:
+            with open(latest, encoding="utf-8") as f:
+                res["snapshot"] = _json.load(f)
+        except Exception:
+            res["snapshot"] = None
+    else:
+        res["snapshot"] = None
+    errf = os.path.join(DIAG_DIR, "errors.log")
+    if os.path.isfile(errf):
+        try:
+            with open(errf, encoding="utf-8", errors="replace") as f:
+                lines = f.read().splitlines()
+            res["errors"] = lines[-600:]
+            res["errors_total"] = len(lines)
+        except Exception:
+            res["errors"] = []
+            res["errors_total"] = 0
+    else:
+        res["errors"] = []
+        res["errors_total"] = 0
+    res["report"] = read_file(os.path.join(DIAG_DIR, "report.txt"))
+    res["running"] = os.path.isfile(os.path.join(DIAG_DIR, "diagd.pid"))
+    res["files"] = [f for f in DIAG_FILES if os.path.isfile(os.path.join(DIAG_DIR, f))]
+    return jsonify(res)
+
+@app.route('/api/diag/report', methods=['POST'])
+def api_diag_report():
+    """立即重生成 report.txt（需 diagd.py 已部署）。"""
+    if not os.path.isfile(DIAGD_SCRIPT):
+        return jsonify({"success": False, "message": "diagd.py 未部署，无法生成报告"})
+    try:
+        env = dict(os.environ)
+        env["PYTHONPATH"] = "/data/openpilot" + os.pathsep + env.get("PYTHONPATH", "")
+        r = subprocess.run([sys.executable, DIAGD_SCRIPT, "--report"],
+                            capture_output=True, text=True, timeout=60, env=env)
+        if r.returncode == 0:
+            return jsonify({"success": True, "message": "报告已生成"})
+        return jsonify({"success": False, "message": "生成失败: " + (r.stderr or r.stdout).strip()[:200]})
+    except Exception as e:
+        return jsonify({"success": False, "message": "生成异常: %s" % e})
+
+@app.route('/api/diag/download/<filename>')
+def api_diag_download(filename):
+    """下载诊断文件（白名单限制，防目录穿越）。"""
+    fn = safe_key(filename)
+    if fn not in DIAG_FILES:
+        return jsonify({"success": False, "message": "禁止访问该文件"}), 403
+    p = os.path.join(DIAG_DIR, fn)
+    if not os.path.isfile(p):
+        return jsonify({"success": False, "message": "文件不存在"}), 404
+    return send_file(p, as_attachment=True)
+
+
 if __name__ == '__main__':
     PORT = 5588
     # 确保目录存在

@@ -501,6 +501,12 @@ mark.hl{background:rgba(var(--accent-rgb),.28);color:var(--accent);border-radius
 .sec{margin-bottom:18px}
 .sec .ph{margin-bottom:10px}
 .cmd-box{background:var(--bg);border:1px solid var(--rule);border-radius:8px;padding:10px;font-family:monospace;font-size:11px;color:var(--ink);white-space:pre-wrap;word-break:break-all;line-height:1.6}
+/* 诊断日志 (diagd) */
+.diag-stat{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:8px;margin:12px 0}
+.diag-box{border:1px solid var(--rule);border-radius:10px;overflow:hidden;background:var(--bg);margin-top:8px}
+.diag-box-h{padding:8px 12px;font-size:12px;font-weight:700;color:var(--muted);background:var(--hdr);border-bottom:1px solid var(--rule)}
+.diag-pre{margin:0;padding:12px;max-height:50vh;overflow:auto;white-space:pre-wrap;word-break:break-all;font-size:11px;line-height:1.5;color:var(--ink);font-family:ui-monospace,Menlo,Consolas,monospace}
+.diag-note{color:var(--muted);font-size:12px;padding:8px 0}
 
 </style>
 </head>
@@ -863,6 +869,25 @@ mark.hl{background:rgba(var(--accent-rgb),.28);color:var(--accent);border-radius
         <div id="lanDevices"></div>
       </div>
     </div>
+
+    </div>
+
+      <!-- 诊断日志 (diagd) -->
+      <div class="sec" id="p-diag">
+        <div class="ph"><h2>诊断日志</h2><p>设备后台守护(diagd)实时记录的所有故障 / 错误 / 进程异常，可复制或下载分享给开发者解析</p></div>
+        <div class="bs-row" style="flex-wrap:wrap;gap:8px">
+          <button class="btn bp" onclick="loadDiag()">🔄 刷新诊断</button>
+          <button class="btn bw" onclick="diagReport()">📝 立即生成报告</button>
+          <button class="btn bw" onclick="diagDownload('report.txt')">⬇️ 下载报告</button>
+          <button class="btn bw" onclick="diagDownload('errors.log')">⬇️ 下载错误流</button>
+          <button class="btn bw" onclick="diagDownload('latest.json')">⬇️ 下载快照</button>
+        </div>
+        <div id="diagStat" class="diag-stat"></div>
+        <div class="diag-box">
+          <div class="diag-box-h">错误 / 故障 / 进程流 (errors.log 末尾 600 行)</div>
+          <pre id="diagErrors" class="diag-pre">点击「刷新诊断」加载…</pre>
+        </div>
+      </div>
 
     </div>
 
@@ -1379,9 +1404,50 @@ function onTabSwitch(id){
   else if(id==='lan'){loadLan()}
   else if(id==='fav'){renderFav();}
   else if(id==='search'){focusSearch();}
+  else if(id==='tools'){loadDiag();}
   else if(id!=='terminal'){loadParamMeta();loadParams()}
   // 每次切换标签都静默检查更新（无需手动点击）
   checkUpdate();
+}
+
+// === 诊断日志 (diagd) ===
+function loadDiag(){
+  var box=document.getElementById('diagErrors');
+  fetch('/api/diag').then(function(r){return r.json()}).then(function(d){
+    var st=document.getElementById('diagStat');
+    if(d.snapshot){
+      var s=d.snapshot;
+      var g=s.git||{};
+      var rows='';
+      rows+=diagRow('守护运行', d.running?'是 (pid 文件存在)':'否');
+      rows+=diagRow('设备温度(最高)', (s.thermal_max_c!=null?s.thermal_max_c+'°C':'未知')+' / 区数 '+(s.thermal_zones||0));
+      rows+=diagRow('剩余空间', (s.storage_free_gb!=null?s.storage_free_gb+' GB':'未知'));
+      rows+=diagRow('分支/提交', (g.branch?g.branch+' @ ':'')+(g.short||'-'));
+      rows+=diagRow('panda 固件戳一致', (s.panda_fw_match?'是':'否')+(s.panda_fw?(' ('+s.panda_fw.slice(0,8)+')'):''));
+      rows+=diagRow('进程异常', (s.proc_missing&&s.proc_missing.length)?s.proc_missing.join(' ; '):'无');
+      rows+=diagRow('工作区未提交', (g.dirty&&g.dirty.length)?(g.dirty.length+' 项'):'无');
+      rows+=diagRow('错误流总行数', (d.errors_total||0));
+      st.innerHTML=rows;
+    } else {
+      st.innerHTML='<div class="diag-note">未检测到诊断快照，请先部署并启动 diagd.py（工具箱 → 工具 → 诊断日志会自动出现数据）</div>';
+    }
+    if(d.errors&&d.errors.length){
+      box.textContent=d.errors.join('\n');
+      box.scrollTop=box.scrollHeight;
+    } else {
+      box.textContent='（暂无错误记录，设备目前健康）';
+    }
+  }).catch(function(e){box.textContent='读取失败: '+e;});
+}
+function diagRow(k,v){return '<div class="ii"><div class="lb">'+esc(k)+'</div><div class="vl">'+esc(v)+'</div></div>';}
+function diagReport(){
+  fetch('/api/diag/report',{method:'POST'}).then(function(r){return r.json()}).then(function(d){
+    toast(d.message||(d.success?'报告已生成':'生成失败'), d.success?'in':'err');
+    loadDiag();
+  }).catch(function(e){toast('生成失败: '+e,'err');});
+}
+function diagDownload(fn){
+  window.open('/api/diag/download/'+encodeURIComponent(fn), '_blank');
 }
 
 // === 局域网扫描 / 设备发现 ===
