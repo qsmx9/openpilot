@@ -142,6 +142,7 @@ procs = [
   PythonProcess("fleet_manager", "selfdrive.frogpilot.fleetmanager.fleet_manager", check_fleet),
   PythonProcess("screenrecord_server", "selfdrive.carrot.screenrecord_server", always_run),
   PythonProcess("carrot_man", "selfdrive.carrot.carrot_man", always_run),#, enabled=not PC),
+  PythonProcess("drive_stats", "selfdrive.carrot.drive_stats", always_run),
   #PythonProcess("auto_overtake", "selfdrive.carrot.auto_overtake", always_run),#, enabled=not PC),
   #PythonProcess("amap_navi", "selfdrive.carrot.amap_navi", always_run),
   #PythonProcess("lane", "selfdrive.carrot.lane", check_lane and only_onroad),

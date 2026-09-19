@@ -146,6 +146,7 @@ inline static std::unordered_map<std::string, uint32_t> keys = {
     {"ShowTpms", PERSISTENT},
     {"ShowDateTime", PERSISTENT},
     {"ShowDrivePanel", PERSISTENT},   // <-- 新增：驾驶数据面板开关
+    {"DriveStats", PERSISTENT},       // 驾驶数据统计(今日/本周/累计/7天) JSON
     {"ShowPathEnd", PERSISTENT},
     {"ShowCustomBrightness", PERSISTENT},
     {"AutoScreenDimMode", PERSISTENT},   // <-- 新增：屏幕智能调光(0关/1降亮/2降亮+暗色遮罩)
