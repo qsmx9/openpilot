@@ -112,7 +112,21 @@ def save_json(path, data):
         pass
 
 # ------------------------- 采集 -------------------------
-def read_dmesg_incremental(last_sec):
+def get_boot_id():
+    try:
+        with open("/proc/sys/kernel/random/boot_id") as f:
+            return f.read().strip()
+    except Exception:
+        return None
+
+def read_dmesg_incremental(state):
+    # 按启动周期(boot_id)过滤，避免 AGNOS 重启后 dmesg 历史回放被误判为新错误
+    boot_id = get_boot_id()
+    last_boot = state.get("last_boot_id")
+    if boot_id and boot_id != last_boot:
+        state["last_boot_id"] = boot_id
+        state["last_dmesg_sec"] = None
+    last_sec = state.get("last_dmesg_sec")
     out, _, _ = run(["dmesg"], timeout=15)
     if not out:
         return [], last_sec
@@ -245,6 +259,17 @@ def get_git():
             "short": head.strip()[:8], "dirty": dirty}
 
 def get_panda_fw():
+    # 优先读 panda 编译产物里的真实固件戳（含烧录 commit），实机权威来源
+    gv = os.path.join(OPENPILOT_DIR, "panda", "board", "obj", "gitversion.h")
+    if os.path.isfile(gv):
+        try:
+            txt = open(gv, encoding="utf-8", errors="replace").read()
+            m = re.search(r'DEV-[0-9a-fA-F]{7,8}(?:-[A-Za-z]+)?', txt)
+            if m:
+                return m.group(0)
+        except Exception:
+            pass
+    # 回退：Params 中记录的固件版本
     for name in ("PandaFirmware", "PandaFirmwareHex"):
         p = os.path.join(PARAMS_D, name)
         if os.path.isfile(p):
@@ -253,6 +278,33 @@ def get_panda_fw():
             except Exception:
                 pass
     return ""
+
+def panda_fw_match(fw, g):
+    """判定 panda 固件与当前代码是否一致（无需重刷）。
+    panda 烧录 commit 是 HEAD 的祖先即可，因安全层未变时无需重刷。"""
+    if not fw:
+        return None
+    m = re.search(r'[0-9a-fA-F]{7,8}', fw)
+    if not m:
+        return None
+    fw_hash = m.group(0).lower()
+    head = g.get("head", "")
+    if not head:
+        return None
+    head_l = head.lower()
+    if fw_hash == head_l[:len(fw_hash)]:
+        return True
+    # git 祖先判定：固件 commit 是 HEAD 的祖先 -> 已含在代码中，无需重刷
+    full, _, rc = run(["git", "-C", OPENPILOT_DIR, "rev-parse", fw_hash])
+    full = full.strip()
+    if rc == 0 and full:
+        _, _, rc2 = run(["git", "-C", OPENPILOT_DIR, "merge-base",
+                         "--is-ancestor", full, head_l])
+        if rc2 == 0:
+            return True
+        return False
+    # commit 对象不在本地（浅克隆截断等），无法判定 -> 未知，不误报
+    return None
 
 def get_device_info():
     dongle = ""
@@ -274,15 +326,13 @@ def get_device_info():
             pass
     return {"dongle_id": dongle, "version": version, "diag_dir": DIAG_DIR}
 
-def psutil_boot():
+def get_uptime_s():
+    # 直接读 /proc/uptime，比解析 /proc/stat btime 更可靠
     try:
-        with open("/proc/stat") as f:
-            for line in f:
-                if line.startswith("btime"):
-                    return int(line.split()[1])
+        with open("/proc/uptime") as f:
+            return int(float(f.read().split()[0]))
     except Exception:
-        pass
-    return int(time.time()) - 1
+        return None
 
 def build_snapshot(state):
     tmax, tcnt = get_thermal()
@@ -292,13 +342,13 @@ def build_snapshot(state):
     proc_missing = check_processes(state)
     return {
         "ts": now().strftime("%Y-%m-%d %H:%M:%S"),
-        "uptime_s": int(time.time() - psutil_boot()),
+        "uptime_s": get_uptime_s(),
         "thermal_max_c": round(tmax, 1) if tmax is not None else None,
         "thermal_zones": tcnt,
         "storage_free_gb": round(free / 1024.0 / 1024.0 / 1024.0, 2) if free else None,
         "git": g,
         "panda_fw": fw,
-        "panda_fw_match": (bool(fw) and fw[:8].lower() == g["short"].lower()),
+        "panda_fw_match": panda_fw_match(fw, g),
         "proc_missing": proc_missing,
     }
 
@@ -489,7 +539,7 @@ def acquire_lock():
 # ------------------------- 主流程 -------------------------
 def collect_once(state):
     snap = build_snapshot(state)
-    dmesg_new, new_sec = read_dmesg_incremental(state.get("last_dmesg_sec"))
+    dmesg_new, new_sec = read_dmesg_incremental(state)
     state["last_dmesg_sec"] = new_sec
     route_lines = extract_route_alerts()
     all_new = dmesg_new + route_lines
