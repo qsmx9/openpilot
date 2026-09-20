@@ -29,8 +29,18 @@ from datetime import date
 import cereal.messaging as messaging
 from openpilot.common.realtime import Ratekeeper
 
-STATS_FILE = "/data/params/d_tmp/drive_stats.json"
-CLOCK_TS = "/data/params/d_tmp/clock.ts"
+# NOTE: keep these OUTSIDE /data/params on purpose.
+#   1) system/manager/manager.py calls Params.clearAll(CLEAR_ON_MANAGER_START) on
+#      every boot, and common/params.cc deletes every file in the params dir that
+#      is not a key in common/params_keys.h -> these JSON/timestamp files were
+#      wiped on every reboot when they lived in the params dir.
+#   2) /data/params/d* is a symlink to a per-install temp dir, so a hardcoded
+#      /data/params/d_tmp no longer resolves to the active params dir on a fresh
+#      install (the UI "reset calibration" action pointed there as well).
+STATS_DIR = "/data/drive_stats"
+STATS_FILE = os.path.join(STATS_DIR, "drive_stats.json")
+CLOCK_TS = os.path.join(STATS_DIR, "clock.ts")
+LEGACY_DIR = "/data/params/d_tmp"  # pre 2026-09-21 location, migrated once
 # Timestamps below this are considered bogus (1970 epoch, or the AGNOS default
 # bogus date ~2025-06-04). They must never be persisted/restored, or they would
 # poison the software-RTC fallback. 1700000000 == 2023-11-14.
@@ -118,10 +128,29 @@ def restore_clock_ts():
     pass
 
 
+def migrate_legacy():
+  """One-time best-effort move of stats/clock files out of the params dir.
+
+  Files sitting in the params dir but not registered in common/params_keys.h get
+  unlinked on every boot, so on most devices there is nothing left to migrate;
+  this only rescues devices whose params dir was not the active one."""
+  try:
+    os.makedirs(STATS_DIR, exist_ok=True)
+    for name in ("drive_stats.json", "clock.ts"):
+      old = os.path.join(LEGACY_DIR, name)
+      new = os.path.join(STATS_DIR, name)
+      if not os.path.exists(new) and os.path.exists(old):
+        with open(old, "rb") as s, open(new, "wb") as d:
+          d.write(s.read())
+  except Exception:
+    pass
+
+
 def main():
   sm = messaging.SubMaster(['carState'])
   rk = Ratekeeper(RATE, print_delay_threshold=None)
 
+  migrate_legacy()
   stats = load_stats()
   engaged_prev = False
   last_save = 0.0

@@ -166,7 +166,7 @@ QString DriveStatsPanel::readFile(const QString& path) {
 }
 
 void DriveStatsPanel::refresh() {
-  QString raw = readFile("/data/params/d_tmp/drive_stats.json");
+  QString raw = readFile("/data/drive_stats/drive_stats.json");
   QJsonObject obj;
   if (!raw.isEmpty()) {
     QJsonDocument doc = QJsonDocument::fromJson(raw.toUtf8());

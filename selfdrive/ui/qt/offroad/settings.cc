@@ -542,7 +542,9 @@ void DevicePanel::calibration() {
     }
 
     std::thread worker([selectedParam]() {
-      std::string base = "/data/params/d_tmp";
+      // /data/params/d is the symlink that always points at the ACTIVE params
+      // dir; the old hardcoded /data/params/d_tmp missed it on fresh installs.
+      std::string base = "/data/params/d";
       std::string cmd;
 
       if (selectedParam == "AllCalibParams" || selectedParam == "所有校准参数") {
