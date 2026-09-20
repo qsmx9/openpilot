@@ -43,8 +43,12 @@ DIR="/data/openpilot"
 SCONS="/usr/local/venv/bin/scons"
 
 # 下载源(按顺序尝试, 第一个通过内容校验的即采用)。大小写必须与分支名完全一致。
+# 注意: jsdelivr 有多个边缘节点(cdn / fastly / gcore), 单独一个节点被墙或抖动时
+# 会整体失败 —— 所以同一个仓库要挂多个边缘, 不能只依赖一个 CDN。
 BASES="
 https://cdn.jsdelivr.net/gh/qsmx9/openpilot@CP-Dev
+https://fastly.jsdelivr.net/gh/qsmx9/openpilot@CP-Dev
+https://gcore.jsdelivr.net/gh/qsmx9/openpilot@CP-Dev
 https://cdn.jsdelivr.net/gh/qingsimuxue99/openpilot@CP-DEV
 "
 
