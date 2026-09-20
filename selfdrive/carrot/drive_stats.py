@@ -2,7 +2,7 @@
 """Drive stats accumulator + software RTC fallback.
 
 Runs as a always-on background process. Subscribes to carState and accumulates
-per-trip driving distance / duration / trip count, then writes a JSON summary
+per-day driving distance / duration / trip count, then writes a JSON summary
 that the offroad home UI renders as a "driving data" panel.
 
 Data is stored as a plain JSON file (NOT a Params key, to avoid the compiled
@@ -37,7 +37,9 @@ from openpilot.common.realtime import Ratekeeper
 #   2) /data/params/d* is a symlink to a per-install temp dir, so a hardcoded
 #      /data/params/d_tmp no longer resolves to the active params dir on a fresh
 #      install (the UI "reset calibration" action pointed there as well).
-STATS_DIR = "/data/drive_stats"
+# DRIVE_STATS_DIR exists so a simulation harness can point this process at a
+# scratch directory instead of the real one.
+STATS_DIR = os.environ.get("DRIVE_STATS_DIR", "/data/drive_stats")
 STATS_FILE = os.path.join(STATS_DIR, "drive_stats.json")
 CLOCK_TS = os.path.join(STATS_DIR, "clock.ts")
 LEGACY_DIR = "/data/params/d_tmp"  # pre 2026-09-21 location, migrated once
@@ -47,6 +49,18 @@ LEGACY_DIR = "/data/params/d_tmp"  # pre 2026-09-21 location, migrated once
 SANE_EPOCH = 1700000000.0
 SAVE_INTERVAL = 30.0  # seconds
 RATE = 20             # Hz
+
+# ---- odometer accumulation parameters ----
+# NOTE: this process must key off fields that ACTUALLY exist on cereal's
+# CarState. CarState has no `controlsAllowed` / `enabled` member (those live on
+# other structs), so reading them raised AttributeError and killed the process
+# on the very first carState frame -> the panel showed all zeros forever even
+# though the car was driven. Stick to vEgo (@1) / standstill (@18).
+MOVE_V = 0.3      # m/s; below this the car counts as stationary
+MAX_DT = 0.5      # s; accumulate() clamps every frame's dt to [0, MAX_DT]. Without
+                  # it a paused process (or a carState publisher gap) would credit
+                  # one huge dt to a single frame and inflate the odometer.
+TRIP_GAP = 180.0  # s; a stop longer than this makes the next move a new "trip"
 
 
 def _empty_bucket():
@@ -61,6 +75,51 @@ def _empty_stats():
 def _iso_week(d):
   """Return (iso_year, iso_week) for an ISO-format date string."""
   return date.fromisoformat(d).isocalendar()[:2]
+
+
+def accumulate(stats, v, dt, idle_secs):
+  """Add one frame of driving to `stats`. Pure function (no IO) so a
+  simulation harness can drive it directly.
+
+  v         current speed, m/s (pass abs() of vEgo)
+  dt        seconds since the previous frame; clamped to [0, MAX_DT] right here
+            so that no caller can credit one huge frame to the odometer
+  idle_secs how long the car has been stationary as of the previous frame
+  Returns the updated idle_secs.
+  """
+  dt = min(max(dt, 0.0), MAX_DT)
+  if v > MOVE_V and dt > 0.0:
+    dist_km = v * dt / 1000.0
+    for b in ("today", "week", "total"):
+      stats[b]["km"] += dist_km
+      stats[b]["min"] += dt / 60.0
+    # one trip == resuming after a long stop (waiting at a red light is not a
+    # new trip)
+    if idle_secs >= TRIP_GAP:
+      for b in ("today", "week", "total"):
+        stats[b]["trips"] += 1
+    return 0.0
+  return idle_secs + dt
+
+
+def roll_over(stats, today, last_date, last_week):
+  """Midnight / ISO-week roll-over. Pure function.
+
+  Archives today's km into daily[last_date], resets today's bucket, trims
+  daily down to the last 7 entries, and resets the week bucket on a Monday
+  boundary. Returns the updated (last_date, last_week).
+  """
+  if not last_date or today == last_date:
+    return last_date, last_week
+  stats["daily"][last_date] = round(stats["today"]["km"], 2)
+  cur_week = _iso_week(today)
+  if last_week is not None and cur_week != last_week:
+    stats["week"] = _empty_bucket()
+  stats["today"] = _empty_bucket()
+  for k in sorted(stats["daily"].keys())[:-7]:
+    stats["daily"].pop(k, None)
+  stats["date"] = today
+  return today, cur_week
 
 
 def load_stats():
@@ -152,11 +211,11 @@ def main():
 
   migrate_legacy()
   stats = load_stats()
-  engaged_prev = False
+  idle_secs = 1e9  # pretend it has been parked, so the first move is a trip
   last_save = 0.0
   last_t = time.monotonic()
   last_date = date.today().isoformat()
-  last_week = _iso_week(last_date) if last_date else None
+  last_week = _iso_week(last_date)
   stats["date"] = last_date
 
   # Software RTC: bring the clock back from persisted time if it reset
@@ -169,38 +228,22 @@ def main():
     dt = now - last_t
     last_t = now
 
-    if sm.updated['carState']:
-      cs = sm['carState']
-      engaged = cs.controlsAllowed
-      v = cs.vEgo  # m/s
-      # distance: only count actual movement while engaged
-      if engaged and v > 0.3:
-        dist_km = v * dt / 1000.0
-        for b in ("today", "week", "total"):
-          stats[b]["km"] += dist_km
-          stats[b]["min"] += dt / 60.0
-      # trip: count once per engagement session (rising edge of controlsAllowed)
-      if engaged and not engaged_prev:
-        for b in ("today", "week", "total"):
-          stats[b]["trips"] += 1
-      engaged_prev = engaged
+    # A single bad frame must NEVER kill this daemon. Regression: the original
+    # code read cs.controlsAllowed, which does not exist on cereal CarState, so
+    # the process died with AttributeError the instant the car started
+    # publishing carState and the odometer stayed at 0 forever.
+    try:
+      if sm.updated['carState']:
+        idle_secs = accumulate(stats, abs(sm['carState'].vEgo), dt, idle_secs)
+    except Exception:
+      pass
 
-    # midnight roll-over: archive today's km into daily[date], reset today,
-    # and reset week on ISO week boundary (Monday)
-    today = date.today().isoformat()
-    if today != last_date:
-      if last_date:
-        stats["daily"][last_date] = round(stats["today"]["km"], 2)
-        cur_week = _iso_week(today)
-        if last_week is not None and cur_week != last_week:
-          stats["week"] = _empty_bucket()
-        last_week = cur_week
-      stats["today"] = _empty_bucket()
-      keys = sorted(stats["daily"].keys())
-      for k in keys[:-7]:
-        stats["daily"].pop(k, None)
-      last_date = today
-      stats["date"] = today
+    # midnight / week roll-over
+    try:
+      last_date, last_week = roll_over(stats, date.today().isoformat(),
+                                       last_date, last_week)
+    except Exception:
+      pass
 
     if now - last_save > SAVE_INTERVAL:
       save_stats(stats)
