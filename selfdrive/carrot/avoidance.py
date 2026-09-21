@@ -127,6 +127,8 @@ class Avoidance:
     self._edge_margin = 0.40     # m
     self._neigh_w_min = 2.00     # m
     self._max_kmh = 50.0         # km/h，0=不限制；超过此速度不再触发避让
+    self._edge_extra = 0.30      # m，路沿/护栏侧的额外安全余量（UI：AvoidEdgeExtra，单位 cm）
+    self._max_rate = 1.5         # m/s，让位量变化率上限（UI：AvoidMaxShiftRate，单位 ×0.1m/s）
 
     # 时序状态
     self._hit = 0
@@ -189,6 +191,12 @@ class Avoidance:
       v = self.params.get_int("AvoidMaxSpeed")
       # 0 或读不到 ⇒ 不限制（保留"高速也避让"的旧行为，可手动关）
       self._max_kmh = float(min(60, max(0, v))) if v > 0 else 0.0
+
+      v = self.params.get_int("AvoidEdgeExtra")   # 路沿额外余量(cm)，默认30=0.30m
+      self._edge_extra = float(min(100, max(0, v))) * 0.01 if v > 0 else 0.30
+
+      v = self.params.get_int("AvoidMaxShiftRate")  # 让位速率(×0.1m/s)，默认15=1.5m/s
+      self._max_rate = float(min(30, max(5, v))) * 0.1 if v > 0 else 1.5
     except Exception:
       self._mode = OFF
 
@@ -332,7 +340,7 @@ class Avoidance:
       return path_xyz
 
     # ---------- ④ 速率限制（介入与退出都平滑；释放可加速） ----------
-    rate = MAX_SHIFT_RATE * (RELEASE_FAST if (self._fast and self._want == 0.0) else 1.0)
+    rate = self._max_rate * (RELEASE_FAST if (self._fast and self._want == 0.0) else 1.0)
     step = rate * dt
     delta = self._want - self._shift
     if abs(delta) <= step:
@@ -529,7 +537,7 @@ class Avoidance:
           if np.isfinite(a) and np.isfinite(b):
             # ★ 路沿是硬边界（护栏/隔离带/路肩），比车道线（可借道）多留 EDGE_EXTRA 余量，
             #   直接回应"左边有护栏时车贴得很近、怕蹭"的实测反馈。
-            m = self._edge_margin + EDGE_EXTRA
+            m = self._edge_margin + self._edge_extra
             y_min = max(y_min, min(a, b) + CAR_HALF_W + m)
             y_max = min(y_max, max(a, b) - CAR_HALF_W - m)
     except Exception:
@@ -660,7 +668,7 @@ class Avoidance:
     if (not self._live) and t_avail < MIN_T_AVAIL:
       return (0.0, 1, "太近")
     remain = max(0.0, mag - abs(self._shift))
-    narrow = 0 if (t_avail * MAX_SHIFT_RATE >= remain * STEP_MARGIN) else 1
+    narrow = 0 if (t_avail * self._max_rate >= remain * STEP_MARGIN) else 1
     borrowed = bool(geo["borrow_l"] if side < 0 else geo["borrow_r"])
     return (shift, narrow, "让位" + ("(借道)" if borrowed else ""))
 

@@ -353,6 +353,8 @@ inline static std::unordered_map<std::string, uint32_t> keys = {
     {"AvoidEdgeMargin", PERSISTENT},
     {"AvoidMinPassWidth", PERSISTENT},
     {"AvoidMaxSpeed", PERSISTENT},
+    {"AvoidEdgeExtra", PERSISTENT},
+    {"AvoidMaxShiftRate", PERSISTENT},
     {"AvoidNarrowCorridor", PERSISTENT},
     {"AvoidActive", PERSISTENT},
     {"CarrotActCounted", CLEAR_ON_MANAGER_START},

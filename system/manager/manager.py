@@ -142,6 +142,10 @@ def get_default_params():
     ("AvoidMinPassWidth", "200"),
     # 避让最高速度（速度上限闸门；0=不限制；默认50km/h）：超过此车速即关闭横向避让
     ("AvoidMaxSpeed", "50"),
+    # 路沿额外余量（cm，默认30=0.30m）
+    ("AvoidEdgeExtra", "30"),
+    # 让位速率上限（×0.1m/s，默认15=1.5m/s）
+    ("AvoidMaxShiftRate", "15"),
     ("CruiseMaxVals0", "80"),
     ("CruiseMaxVals1", "100"),
     ("CruiseMaxVals2", "120"),
