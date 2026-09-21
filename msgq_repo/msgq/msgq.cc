@@ -180,6 +180,28 @@ void msgq_init_subscriber(msgq_queue_t * q) {
 
     // No more slots available. Reset all subscribers to kick out inactive ones
     if (new_num_readers > NUM_READERS){
+      // [NRFIX-RECLAIM] msgq 没有 unregister 接口：订阅者进程退出后它的读者槽位永久泄漏。
+      // 原逻辑在此处一刀切驱逐全部读者（全场踩踏）；这里先尝试回收「属主线程已不存在」的僵尸槽位。
+      bool nrfix_reclaimed = false;
+      for (size_t i = 0; i < NUM_READERS; i++){
+        uint64_t nrf_uid = *q->read_uids[i];
+        if (nrf_uid == 0){
+          continue;
+        }
+        if (syscall(SYS_tkill, (uint32_t)(nrf_uid & 0xFFFFFFFF), 0) != 0 && errno == ESRCH){
+          q->reader_id = static_cast<int>(i);
+          q->read_uid_local = uid;
+          *q->read_valids[i] = false;
+          *q->read_pointers[i] = 0;
+          *q->read_uids[i] = uid;
+          nrfix_reclaimed = true;
+          break;
+        }
+      }
+      if (nrfix_reclaimed){
+        break;
+      }
+
       //std::cout << "Warning, evicting all subscribers!" << std::endl;
       *q->num_readers = 0;
 
