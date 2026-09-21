@@ -1147,6 +1147,18 @@ CarrotPanel::CarrotPanel(QWidget* parent, int mode) : QWidget(parent) {
   toggles_layout->addWidget(navToggles);
   } else {
   featToggles = new ListWidget(this);
+  // === 静止障碍横向避让 v2（独立开关，默认关=零影响原逻辑；无视车道线让位，最多借一条邻车道）===（已置顶：功能菜单最上端）
+  featToggles->addItem(sectionHeader("静止障碍避让辅助"));
+  featToggles->addItem(new CValueControl("AvoidObstacle", "静止障碍避让(0)", "行驶中遇到前方静止或极慢的障碍(路边停车/抛锚车/故障车)时, 朝远离障碍的一侧让位; 让位后与障碍的车对车横向间距必须达到[安全间距]才算有效, 做不到就横向一点不让并通知纵向减速; 允许越过本车道线、最多借入一条邻车道, 让位后车身外沿仍留在邻车道外线与道路边缘之内并留出余量; 正前方(压在本车行驶线上)的障碍不绕行, 交给跟车/刹停; 0:关闭(完全不影响原逻辑), 1:开启", 0, 1, 1));
+  featToggles->addItem(new CValueControl("AvoidTriggerDist", "触发距离(35)m", "往前多远开始处理该障碍, 单位m; 超过此距离不理会; 障碍近于4m时不再新发起让位(横向已来不及, 交跟车/驾驶员)", 10, 80, 1));
+  featToggles->addItem(new CValueControl("AvoidOffsetLimit", "让位上限(250)cm", "单侧最多让出多少横向距离, 单位cm; 越大能让开的场景越多(实测绕开正前方障碍需约240cm), 越小越保守; 实际让位还会被[邻车道外线/道路边缘]与[安全间距]进一步夹紧", 50, 400, 10));
+  featToggles->addItem(new CValueControl("AvoidSafeGap", "安全间距(60)cm", "让位后与障碍必须保证的车对车侧向间隙, 单位cm; 这是硬门槛: 达不到就不让位并通知纵向减速, 不做[擦着过]的半吊子让位; 越大越早放弃绕行改为减速, 越小越敢贴近通过", 20, 150, 5));
+  featToggles->addItem(new CValueControl("AvoidEdgeMargin", "距边界余量(30)cm", "让位后车身外沿距[邻车道外线/道路边缘]至少保留的余量, 单位cm; 越大越保守(让位量被压缩), 越小越贴边", 10, 100, 5));
+  featToggles->addItem(new CValueControl("AvoidMinPassWidth", "邻车道最小宽(200)cm", "邻车道宽度小于此值时不认为它可借道, 只在本车道内让位, 单位cm; 越大越不容易借道, 越小越容易越过本车道线借入邻车道", 150, 400, 10));
+  // === 避让最高速度（速度上限闸门：超过设定车速即关闭横向避让；0=不限制；默认50km/h）===
+  //     说明（中文）：行驶车速一旦超过本值，模块直接不触发任何横向避让，把决策交还给驾驶员/跟车，
+  //     因为高速下急打方向极其危险；设为 0 表示不做速度限制（任何速度都允许避让）。可调范围 0~60 km/h。
+  featToggles->addItem(new CValueControl("AvoidMaxSpeed", "避让最高速度(50)km/h", "超过此速度不再触发横向避让(高速急打方向危险, 易失控); 0=不限制(任何速度都允许避让); 可调范围 0~60 km/h, 步进 5", 0, 60, 5));
   featToggles->addItem(sectionHeader("横向与转向辅助"));
 
   featToggles->addItem(new CValueControl("AutoLaneCorrection", "自动居中纠偏(2)", "0:关闭, 1:实时纠偏, 2:实时纠偏+学习固定偏差(自动保持车道居中)", 0, 2, 1));
