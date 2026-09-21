@@ -228,7 +228,7 @@ void OffroadHome::refresh() {
     QFile model_file("/sys/firmware/devicetree/base/model");
     if (model_file.open(QIODevice::ReadOnly)) {
       QString raw = QString::fromUtf8(model_file.readAll()).simplified();
-      model = raw.contains("tici", Qt::CaseInsensitive) ? "comma3x" : raw;
+      model = raw.contains("tici", Qt::CaseInsensitive) ? "MR.ONE-C3系列" : raw;
     } else {
       model = "PC";
     }
