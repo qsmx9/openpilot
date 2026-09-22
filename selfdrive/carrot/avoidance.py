@@ -80,6 +80,11 @@ CAR_HALF_W = 0.90            # m，本车半宽
 OBS_HALF_W = 1.05            # m，障碍半宽（按 2.1m 宽乘用车/SUV 保守取；卡车更宽靠安全间距兜）
 MIN_OBS_DREL = 4.0           # m，比这更近不再作"新触发"（已来不及，且近场不可靠）
 MAX_ABS_YREL = 6.0           # m，障碍横向位置超出此范围视为数据不可信
+# ★ 本车道横向半宽上限：障碍 yRel 必须落在此范围内，才认作"需避让的本车道障碍"。
+#   旁车道车（无论动静、堵不堵）yRel 通常 >2m，会被此闸门排除——它们不在你车上，
+#   不应触发本车道横向避让（即修复"旁车道有车就左偏"的误触发）。旁车道信息仍被
+#   借道绕障逻辑（_bound_at 靠车道线放宽走廊）使用，本闸门不影响它，故不是删功能。
+LANE_HALF_W = 1.8           # m，≈标准车道半宽；本车道内偏置的静止障碍（yRel<1.8）仍正常触发避让
 VLEAD_STATIC = 1.5           # m/s，目标速度低于此视为"静止/极慢"（≈5.4km/h）
 MIN_SPEED_KMH = 10.0         # km/h，**起手**速度门槛（见 _gates_ok 注释：只在"新发起"时检查）
 #   ★ 实测（晚高峰 69055 帧真实数据）：威胁帧车速 p25=2.2 / p50=12.0 / p75=20.8 km/h，
@@ -437,7 +442,8 @@ class Avoidance:
         if (vLead < VLEAD_STATIC
             and MIN_OBS_DREL < dRel < self._trig
             and (conf >= 0.40 or radar)
-            and np.isfinite(yRel) and abs(yRel) < MAX_ABS_YREL):
+            and np.isfinite(yRel) and abs(yRel) < MAX_ABS_YREL
+            and abs(yRel) < LANE_HALF_W):
           return {"yRel": yRel, "dRel": dRel, "vLead": vLead, "conf": conf, "src": "radar"}
     except Exception:
       pass
@@ -453,7 +459,8 @@ class Avoidance:
         if (prob >= 0.55
             and vLead < VLEAD_STATIC
             and MIN_OBS_DREL < dRel < self._trig
-            and np.isfinite(yRel) and abs(yRel) < MAX_ABS_YREL):
+            and np.isfinite(yRel) and abs(yRel) < MAX_ABS_YREL
+            and abs(yRel) < LANE_HALF_W):
           return {"yRel": yRel, "dRel": dRel, "vLead": vLead, "conf": prob, "src": "vision"}
     except Exception:
       pass

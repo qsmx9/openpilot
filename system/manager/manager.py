@@ -140,8 +140,8 @@ def get_default_params():
     ("AvoidSafeGap", "60"),
     ("AvoidEdgeMargin", "30"),
     ("AvoidMinPassWidth", "200"),
-    # 避让最高速度（速度上限闸门；0=不限制；默认50km/h）：超过此车速即关闭横向避让
-    ("AvoidMaxSpeed", "50"),
+    # 避让最高速度（速度上限闸门；0=不限制；默认0=不限制，恢复"任何速度都避让"的原有行为）：超过此车速即关闭横向避让
+    ("AvoidMaxSpeed", "0"),
     # 路沿额外余量（cm，默认30=0.30m）
     ("AvoidEdgeExtra", "30"),
     # 让位速率上限（×0.1m/s，默认15=1.5m/s）
