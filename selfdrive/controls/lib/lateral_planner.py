@@ -303,13 +303,22 @@ class LateralPlanner:
     extra = ""
     if self.lanelines_active:
       extra = f" | 偏移{self.LP.offset_total * 100.0:.1f}cm 弯速{turn_str}"
+    # 避让状态读数（独立模块：开关关闭/无目标时 avoid.debug 为空 ⇒ 零影响；
+    # 触发时底栏实时显示「避障+1.85m(借道)」/「避障待机(正前方·跟停)」等）
+    avoid_info = ""
+    try:
+      if self.avoid.debug:
+        avoid_info = f" | {self.avoid.debug}"
+    except Exception:
+      pass
     debugText = (
       f"{'车道线' if self.lanelines_active else '无车道线'} | " +
       lane_info +
       extra +
       f" | {ac_str}" +
       radar_left_info +
-      radar_right_info
+      radar_right_info +
+      avoid_info
     )
 
     lateralPlan.latDebugText = debugText

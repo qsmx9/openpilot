@@ -67,6 +67,7 @@ d_prob 无需设闸门（v1 要求 d_prob≥0.95，实测常常不满足，等�
 """
 
 import time
+from collections import deque
 
 import numpy as np
 
@@ -123,6 +124,17 @@ BOUND_MIN_X = 1.0            # m，最小采样距离
 # ★ 护栏/路沿（roadEdges，硬边界）比车道线（可借道）多留的余量：
 #   用户实测反馈"左边有护栏时车贴得很近、怕蹭"，故道路边缘侧额外留 30cm。
 EDGE_EXTRA = 0.30            # m
+# ★★ 【已停用】跟停判据 / 横向偏置硬门槛（2026-09-22 用户拍板后废弃，常量保留仅为回溯）：
+#   原设计：窗口内 vLead 曾超 FOLLOW_STOP_V ⇒ "会动的车"(等灯/跟停) ⇒ 交纵向不绕；
+#   配合 HEADON_MIN_OFFSET=0.60 作"正前方里偏够多才绕"的横向门槛。
+#   ★ 废弃原因：用户 2026-09-22 明确要求「我不要错车，我就要跨道绕开，简单粗暴，
+#     包括遇到行人也要这样」⇒ 正前方分支改为**全放行**（详见 _decide 内注释），
+#     两道闸同时停用。`_track_lead` 仍在每帧维护历史，但结果不再参与拦阻。
+#   ⚠️ 不要因为这两个常量还在就以为判据仍在生效——去 _decide 看实际分支。
+FOLLOW_STOP_V = 2.0        # m/s（≈7.2km/h）【已停用】
+LEAD_HIST_T = 10.0         # s，跟停判据历史窗口【已停用】
+LEAD_SWITCH_D = 8.0        # m，换目标判据 |ΔdRel|【已停用】
+HEADON_MIN_OFFSET = 0.60   # m，正前方横向偏置门槛【已停用】
 
 
 class Avoidance:
@@ -144,6 +156,12 @@ class Avoidance:
     self._max_rate = 1.5         # m/s，让位量变化率上限（UI：AvoidMaxShiftRate，单位 ×0.1m/s）
     self._center_band = 0.60     # m，正前方判定带宽（UI：AvoidCenterBand，单位 cm）
     self._queue_check = True     # 队列判据开关（UI：AvoidQueueCheck）
+    self._head_on = False        # 正前方孤立障碍也绕行（UI：AvoidQueueCheck==2 时启用）
+
+    # 跟停判据历史（正前方绕行的第二道闸；每帧由 _track_lead 维护）
+    self._lead_hist = deque()    # [(t, vLead), ...]，按时间戳过期
+    self._lead_vmax = 0.0        # 窗口内 vLead 最大值
+    self._last_lead_d = None     # 上一帧 leadOne.dRel（目标切换检测用）
 
     # 时序状态
     self._hit = 0
@@ -220,14 +238,35 @@ class Avoidance:
       v = self.params.get_int("AvoidCenterBand")
       self._center_band = float(min(150, max(20, v))) * 0.01 if v > 0 else 0.60
 
-      v = self.params.get_int("AvoidQueueCheck")   # 1=启用队列判据（默认1）
+      v = self.params.get_int("AvoidQueueCheck")   # 0=关 1=开(默认) 2=开+正前方孤立障碍也绕
       self._queue_check = (v != 0)
+      self._head_on = (v == 2)
     except Exception:
       self._mode = OFF
 
-  def _need(self):
-    """达到安全间距所需的"车中心到障碍中心"横向距离。"""
-    return CAR_HALF_W + OBS_HALF_W + self._safe_gap
+  def _need(self, obs_half_w=None):
+    """达到安全间距所需的"车中心到障碍中心"横向距离（跨道绕行口径）。
+
+    ★★★ 2026-09-22 用户明确要求：**就要跨道绕开（简单粗暴），不要错车**。
+      因此本口径是唯一口径：绕行后车中心必须距障碍中心 need，即
+      `shift = |d| ± need` ⇒ 偏置越小让得越多（偏置 0.1m 需让 2.45m，必然跨到邻车道）。
+      这正是用户要的"跨道绕开"；不要改成外沿间隙口径。
+
+    ★★ `obs_half_w` 参数与行人（2026-09-22 实测澄清，务必知悉）：
+      本参数**允许**按目标实际半宽计算（车 1.05m / 行人 0.40m），但——
+      ⛔ **感知链路根本不提供"这是行人还是车"的信息**。已逐层核查 `cereal/log.capnp`：
+        · `RadarState.LeadData`   → 只有 dRel/yRel/vRel/vLead/modelProb/radar，**无类型/宽度**
+        · `ModelDataV2.LeadDataV2` → 只有 prob/t/xyva/xyvaStd，**无类型/宽度**
+        · `ModelDataV2.LeadDataV3` → 只有 prob/t/x/y/v/a 及各 std，**无类型/宽度**
+      ⇒ 两个数据源（雷达 leadOne / 视觉 leadsV3）都只能填 `OBS_HALF_W`（车宽 1.05m），
+        `obs_half_w=0.40` 这条分支**当前没有数据源能触发**，属"接口预留"。
+      ⇒ 实际行为：**行人按车宽处理 ⇒ need=2.55m ⇒ 让得更多 ⇒ 是保守（安全）方向**，
+        用户要的"遇到行人也绕开"**在行为上成立**（只是按车宽绕、让位量偏大）。
+      ⚠️ 若将来模型侧提供了目标类型字段，只需在 `_pick_obstacle` 里填对应的 obs_half_w，
+        本函数无需改动。**在那之前，不要在任何对外说明里宣称"已按行人宽度优化让位量"。**
+    """
+    hw = OBS_HALF_W if obs_half_w is None else float(obs_half_w)
+    return CAR_HALF_W + hw + self._safe_gap
 
   # ------------------------------------------------------------------ 标志写出
   def _write_flags(self, active, narrow):
@@ -299,6 +338,7 @@ class Avoidance:
 
     dt = self._dt()
     self._fast = False
+    self._track_lead(sm)     # 跟停判据历史：每帧维护（正前方绕行的第二道闸）
     # ★ 车速闸门只在"尚未认领"时生效：认领之后即使被 narrow 压到低速也必须维持声明，
     #   否则会出现 narrow→减速→掉出闸门→撤销 narrow→加速 的极限环。
     gates = self._gates_ok(LP, v_ego, CS, engage=not self._live)
@@ -360,7 +400,8 @@ class Avoidance:
 
     # ---------- ③ 尚未认领：不改路径、不写标志 ----------
     if not self._live:
-      self.debug = "确认中 %d/%d %s" % (self._hit, CONFIRM_N, tag)
+      # _hit==0 ⇒ 无目标/闸门失效，debug 置空（UI 不刷屏）；>0 ⇒ 显示确认进度与判据原因
+      self.debug = ("避障确认%d/%d %s" % (self._hit, CONFIRM_N, tag)) if self._hit > 0 else ""
       self._write_flags(False, 0)
       return path_xyz
 
@@ -393,7 +434,7 @@ class Avoidance:
           self._hold_t = 0.0
       self.active = False
       self._write_flags(False, self._narrow)
-      self.debug = "未生效(%s)" % tag
+      self.debug = "避障待机(%s)" % tag
       return path_xyz
 
     # ---------- ⑤ 应用 ----------
@@ -406,13 +447,47 @@ class Avoidance:
     if not self._apply(path_xyz, self._shift):
       self.active = False
       self._write_flags(False, self._narrow)
-      self.debug = "应用被拒(%s)" % tag
+      self.debug = "避障被拒(%s)" % tag
       return path_xyz
 
     self.active = True
     self._write_flags(True, self._narrow)
-    self.debug = "让位%+.2fm %s%s" % (self._shift, tag, " 让不开" if self._narrow else "")
+    # ★ 用户可感知格式：「避障+1.85m(借道)」「避障+1.85m(已越过) 让不开」
+    stag = tag.replace("让位", "").replace("保持", "")
+    self.debug = "避障%+.2fm%s%s" % (self._shift, stag, " 让不开" if self._narrow else "")
     return path_xyz
+
+  # ------------------------------------------------------------------ 跟停判据
+  def _track_lead(self, sm):
+    """
+    每帧记录 leadOne 的 vLead，维护 LEAD_HIST_T 秒的滑动窗口最大值 _lead_vmax。
+    用途（正前方绕行 AvoidQueueCheck=2 的第二道闸）：
+      _lead_vmax > FOLLOW_STOP_V ⇒ 前车是"开过来停下的"（等灯/跟停）⇒ 交纵向，不绕。
+    ★ 目标切换（dRel 跳变 > LEAD_SWITCH_D）⇒ 历史清零：换新目标后旧车的速度历史
+      不能背书（否则高速超过一辆慢车后，新出现的静止车会背着旧车的"它动过"记录）。
+    ★ lead 短暂丢失不清历史（雷达丢 1~2 帧是常态），只靠时间戳自然过期。
+    """
+    try:
+      lead = sm['radarState'].leadOne
+      if bool(getattr(lead, "status", False)):
+        d = float(getattr(lead, "dRel", 0.0))
+        v = float(getattr(lead, "vLead", 0.0))
+        if self._last_lead_d is not None and abs(d - self._last_lead_d) > LEAD_SWITCH_D:
+          self._lead_hist.clear()
+        self._last_lead_d = d
+        if np.isfinite(v):
+          self._lead_hist.append((time.monotonic(), v))
+      else:
+        self._last_lead_d = None
+    except Exception:
+      pass
+    try:
+      t0 = time.monotonic() - LEAD_HIST_T
+      while self._lead_hist and self._lead_hist[0][0] < t0:
+        self._lead_hist.popleft()
+      self._lead_vmax = max((v for _, v in self._lead_hist), default=0.0)
+    except Exception:
+      self._lead_vmax = 0.0
 
   # ------------------------------------------------------------------ 闸门
   def _gates_ok(self, LP, v_ego, CS, engage):
@@ -480,8 +555,11 @@ class Avoidance:
 
   def _pick_obstacle(self, sm):
     """
-    返回 {'yRel','dRel','vLead','conf','src'} 或 None。
+    返回 {'yRel','dRel','vLead','conf','src','obs_half_w','queue'} 或 None。
     ★ `yRel` 一律已转换到 **本车 path 坐标系（右为正）**。
+    ★ `obs_half_w` = 该目标的半宽。⚠️ 两个数据源（雷达 LeadData / 视觉 LeadDataV3）
+      **都没有类型或宽度字段**（已逐层核查 cereal/log.capnp）⇒ 只能填车宽 OBS_HALF_W。
+      行人不做区分、按车宽处理 ⇒ need 偏大 ⇒ 保守方向。详见 `_need()` 的说明。
     """
     # ① 主源：radarState.leadOne（yRel 左为正 ⇒ 取负）
     try:
@@ -498,6 +576,7 @@ class Avoidance:
             and np.isfinite(yRel) and abs(yRel) < MAX_ABS_YREL
             and abs(yRel) < LANE_HALF_W):
           return {"yRel": yRel, "dRel": dRel, "vLead": vLead, "conf": conf, "src": "radar",
+                  "obs_half_w": OBS_HALF_W,
                   "queue": self._is_queue(sm, dRel)}
     except Exception:
       pass
@@ -516,6 +595,7 @@ class Avoidance:
             and np.isfinite(yRel) and abs(yRel) < MAX_ABS_YREL
             and abs(yRel) < LANE_HALF_W):
           return {"yRel": yRel, "dRel": dRel, "vLead": vLead, "conf": prob, "src": "vision",
+                  "obs_half_w": OBS_HALF_W,
                   "queue": self._is_queue(sm, dRel)}
     except Exception:
       pass
@@ -556,6 +636,17 @@ class Avoidance:
         continue
       vals.append(v)
 
+    # ★★★ 安全修复（2026-09-22 强化验证发现）：**没有足够车道线 ⇒ 必须判"几何不可信"**。
+    #   原实现把 y_min/y_max 初始化成 ∓inf，当 `len(vals) < 2`（无车道线 / 只有 1 条 /
+    #   全部超出 x 有效范围）时，走廊就退化成 **(-inf, +inf) = 无限宽** ⇒ `_decide` 认为
+    #   "哪边都能让" ⇒ **在完全没有车道信息的情况下照常横移 1.875m**。实测复现：
+    #   `laneLines=[]` 与 `laneLines=[一条]` 两种场景下 `active=1 / shift=1.875`，属严重缺陷。
+    #   正解：几何不可信时返回 None（=_geometry 返回 None ⇒ 不介入），
+    #   宁可什么都不做，也绝不在没有边界认知时动方向。
+    #   注意：路沿**不能**单独充当边界——它只用于"收紧"，本来就允许缺失。
+    if len(vals) < 2:
+      return None
+
     y_min = -np.inf
     y_max = np.inf
     l1 = r1 = None
@@ -580,6 +671,16 @@ class Avoidance:
           if outer_r is not None and self._neigh_w_min <= (outer_r - r1) <= NEIGH_W_MAX:
             y_max = max(y_max, outer_r - CAR_HALF_W - m)   # 放宽（越一条线）
             borrow_r = True
+        else:
+          # ★★ 有车道线但**测不出合理的本车道宽**（lane_w 越界，例如两条线其实同属
+          #    邻车道、或弯道上投影错位）⇒ 本车道的两侧边界未知 ⇒ 同"缺线"处理：
+          #    判几何不可信返回 None，绝不退化成无限走廊。
+          return None
+      else:
+        # ★ 有 ≥2 条线但**全部落在 y_ref 同一侧**（y_path 已明显偏离所有车道线，
+        #   例如本车正跨线/压线、或路径与车道线不匹配）⇒ 无法界定"本车道是哪两条之间"
+        #   ⇒ 几何不可信。原实现会静默保持 ∓inf（无限走廊）。
+        return None
 
     # 路沿：物理兜底，只收紧（即使车道线不全也生效）
     try:
@@ -693,7 +794,7 @@ class Avoidance:
       障碍都吃掉。改成 CENTER_BAND 后语义才正确：**车道正中央**的静止车交纵向（跟停 / 等灯 /
       排队），**偏侧停靠**的静止车才评估横移绕行 —— 这就是"正确识别静止车辆 vs 停车等待车辆"。
     """
-    need = self._need()
+    need = self._need(det.get("obs_half_w"))
     y_path = geo["y_path"]
     y_obs = det["yRel"]                      # 障碍绝对横向位置（path 坐标系）
     d = y_obs - y_path                       # 障碍相对本车路径的偏移（右为正）
@@ -707,7 +808,18 @@ class Avoidance:
     #   障碍中心偏离本车路径 < CENTER_BAND ⇒ 它挡在**车道正中央**（等红灯 / 排队 / 正前方
     #   跟车），横向让开它必须跨整条车道、危险且反直觉 ⇒ 交纵向跟停，横向不抢。
     if abs(d) < self._center_band:
-      return (0.0, 0, "正前方目标")
+      # ★★★ 用户 2026-09-22 明确要求：**正前方的车和行人也必须跨道绕开，简单粗暴**。
+      #   因此三档=2 时正前方目标**直接放行**（不再加偏置门槛、不再用跟停判据拦）。
+      #   等灯/排队的防护改由两道**硬**判据承担（都比"偏置"更可靠）：
+      #     ① 车流判据 `_is_queue`：它前方还有别的车 ⇒ 真·排队 ⇒ 交纵向（保留）
+      #     ② 起手速度门槛 MIN_SPEED_KMH=10km/h：等灯跟停时自车低于门槛 ⇒ 不会新发起
+      #   ⚠️ 历史教训（保留警示）：曾靠"近10s 目标没动过"判孤立障碍 —— 实测无效且有害：
+      #      正常跟车/缓行的前车 vLead≈0 也会被误判成"抛锚"，导致平移 2.67m 卡 27s。
+      #      故该判据已停用；改为"正前方全放行 + 车流/速度双兜底"。
+      if not self._head_on:
+        return (0.0, 0, "正前方目标")
+      if bool(det.get("queue", False)):
+        return (0.0, 0, "正前方·前车流")
 
     # ★ 队列判据：障碍虽偏侧，但它前方还有别的车（车流 / 排队缓行）⇒ 它是"车流里的一辆"，
     #   不是"孤立停靠的静止车辆" ⇒ 同样交纵向跟停，不做横移绕行。
@@ -719,6 +831,8 @@ class Avoidance:
     #   s_l<0：向左让到"障碍落在我们右侧 need 处"；s_r>0：向右让到"障碍落在我们左侧 need 处"
     # ★ 必须与 geo 的 s_min/s_max 同一语义（都是"允许的 shift 区间"），
     #   绝不能拿绝对 y 去比绝对边界——那是 v2 首轮真实踩到的错位 bug。
+    # ★★★ 跨道口径（用户 2026-09-22 明确要求，不做错车）：
+    #   `need`=2.55m ⇒ 绕行即跨到邻车道，简单粗暴。不改。
     s_l = (y_obs - need) - y_path
     s_r = (y_obs + need) - y_path
     ok_l = (s_l >= geo["s_min"]) and ((-s_l) <= self._off_lim)
