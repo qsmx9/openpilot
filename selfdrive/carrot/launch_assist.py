@@ -31,6 +31,10 @@ ON = 1
 LAUNCH_WINDOW_V = 2.0      # m/s：低于此速视为"起步窗口"，平顺起步在此窗口内生效
 LEAD_DEPART_VREL = 0.6     # m/s：前车速度从低于此值升到高于此值视为"起步"
 
+# ===== 起步跟随(2026-09-27 新增, 独立开关, 默认关=零影响) =====
+START_FOLLOW_VREL = 0.5    # m/s：起步跟随——前车速度高于此值视为"已在动"
+START_FOLLOW_CONFIRM = 3   # 帧：前车持续在动且达到安全间距的确认帧数(100Hz⇒30ms)
+
 
 class LaunchAssist:
   def __init__(self):
@@ -49,6 +53,10 @@ class LaunchAssist:
     self.depart_speed_cap = 4.0
     self.lead_v_prev = 0.0
     self.depart_streak = 0
+    # —— 起步跟随 (2026-09-27 新增) ——
+    self.startfollow_mode = OFF
+    self.startfollow_dist = 4.0
+    self.sf_streak = 0
     # —— 参数重读节流 ——
     self._pc = 0
 
@@ -64,11 +72,14 @@ class LaunchAssist:
       self.creep_speed = max(0.3, float(self.params.get_int("TrafficJamCreepSpeed")) * 0.1)
       self.depart_mode = self.params.get_int("LeadDepartureMode")
       self.depart_speed_cap = max(1.0, float(self.params.get_int("LeadDepartureSpeed")) * 0.1)
+      self.startfollow_mode = self.params.get_int("StartFollowMode")
+      self.startfollow_dist = max(3.0, float(self.params.get_int("StartFollowDist")) * 0.1)
     except Exception:
       # 未编译进 params_keys.h 前（理论上不会发生）一律当作全部关闭，零影响
       self.launch_mode = OFF
       self.creep_mode = OFF
       self.depart_mode = OFF
+      self.startfollow_mode = OFF
 
   def _reset(self):
     self.prev_standstill = True
@@ -76,10 +87,11 @@ class LaunchAssist:
     self.launch_counter = 0
     self.lead_v_prev = 0.0
     self.depart_streak = 0
+    self.sf_streak = 0
 
   def update(self, carrot, sm, v_ego, v_cruise):
     self._read_params()
-    if self.launch_mode == OFF and self.creep_mode == OFF and self.depart_mode == OFF:
+    if self.launch_mode == OFF and self.creep_mode == OFF and self.depart_mode == OFF and self.startfollow_mode == OFF:
       self._reset()
       return
 
@@ -118,9 +130,33 @@ class LaunchAssist:
         carrot.stop_dist = 0.0
         carrot.mode = 'acc'
 
-    # ===== #1 平顺起步（前车起步预判激活时跳过，避免互相打架）=====
+    # ===== 起步跟随(2026-09-27 新增, 独立开关, 默认关=零影响) =====
+    # 场景: 停车跟车时前车走了很远(实测约7~8m)我们的车才跟进, 反应太慢。
+    # 本功能: 前车一开始动, 且间距>=设定起步距离(下限3m防追尾), 立即强制切出停车态起步跟随。
+    start_follow_active = False
+    if self.startfollow_mode != OFF and lead_status and lead_d < 80.0 and v_ego < 1.5:
+      if lead_v > START_FOLLOW_VREL and lead_d >= self.startfollow_dist:
+        self.sf_streak += 1
+      else:
+        self.sf_streak = 0
+      if self.sf_streak >= START_FOLLOW_CONFIRM:
+        start_follow_active = True
+    else:
+      self.sf_streak = 0
+
+    if start_follow_active:
+      # 立即跟手: 把目标抬到前车速度(至少2.0m/s确保真在动), 强制切出停车态
+      target = min(max(lead_v, 2.0), 8.0)
+      if carrot.v_cruise < target:
+        carrot.v_cruise = target
+      if carrot.xState in (XState.e2eStop, XState.e2eStopped) and not cs.leftBlinker:
+        carrot.xState = XState.e2eCruise
+        carrot.stop_dist = 0.0
+        carrot.mode = 'acc'
+
+    # ===== #1 平顺起步（前车起步预判/起步跟随激活时跳过，避免互相打架）=====
     launching = (v_ego < LAUNCH_WINDOW_V) and (carrot.v_cruise > 0.5) and (carrot.trafficState != TrafficState.red)
-    if self.launch_mode != OFF and launching and not depart_active:
+    if self.launch_mode != OFF and launching and not (depart_active or start_follow_active):
       # 起步窗口内，把目标限制在"当前速度+缓给量"，MPC 只小幅加速 => 不窜
       cap = v_ego + self.launch_init
       if carrot.v_cruise > cap:

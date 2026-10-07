@@ -59,6 +59,8 @@ def can_comm_callbacks(logcan: messaging.SubSocket, sendcan: messaging.PubSocket
   return can_recv, can_send
 
 
+
+
 class Car:
   CI: CarInterfaceBase
   RI: RadarInterfaceBase
@@ -109,6 +111,7 @@ class Car:
     else:
       self.CI, self.CP = CI, CI.CP
       self.RI = RI
+
 
     # set alternative experiences from parameters
     disengage_on_accelerator = self.params.get_bool("DisengageOnAccelerator")

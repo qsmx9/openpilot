@@ -12,10 +12,6 @@ from cereal import log
 from openpilot.common.params import Params
 #from openpilot.selfdrive.controls.lib.lane_planner import LanePlanner
 from openpilot.selfdrive.controls.lib.lane_planner_2 import LanePlanner
-# new: 弯道居中（独立模块，独立开关，默认关=零影响）
-from openpilot.selfdrive.carrot.curve_centering import CurveCentering
-# new: 静止障碍横向避让（独立模块，独立开关，默认关=零影响）
-from openpilot.selfdrive.carrot.avoidance import Avoidance
 from collections import deque
 
 TRAJECTORY_SIZE = 33
@@ -58,10 +54,6 @@ class LateralPlanner:
     self.latDebugText = ""
     # lane_mode
     self.LP = LanePlanner()
-    # new: 弯道居中控制器（独立开关，关闭时整段 no-op）
-    self.cc = CurveCentering()
-    # new: 静止障碍横向避让（独立开关，关闭时整段 no-op）
-    self.avoid = Avoidance()
     self.readParams = 0
     self.lanelines_active = False
     self.lanelines_active_tmp = False
@@ -152,13 +144,6 @@ class LateralPlanner:
     self.LP.lane_width_right = md.meta.laneWidthRight
     self.LP.curvature = measured_curvature
     self.path_xyz, self.lanelines_active = self.LP.get_d_path(sm['carState'], self.v_ego, self.t_idxs, self.path_xyz, self.curve_speed)
-
-    # === 弯道居中（独立模块，独立开关，默认关=零影响）===
-    self.path_xyz = self.cc.update(carrot, sm, self.path_xyz, self.LP, measured_curvature, self.v_ego, sm['carState'])
-
-    # === 静止障碍横向避让（独立模块，独立开关，默认关=零影响）===
-    # 必须在 yaw_from_path_no_scipy() 反算 yaw 之前，让 yaw/yaw_rate 跟随让位后的路径重算。
-    self.path_xyz = self.avoid.update(carrot, sm, self.path_xyz, self.LP, self.v_ego, sm['carState'])
 
     # === 横向转向平滑(新CP移植): 车道线有效时从几何平滑路径反算yaw/yaw_rate(限幅2.0), laneless保持原始yaw ===
     if self.lanelines_active:
@@ -294,7 +279,12 @@ class LateralPlanner:
     if ac_on:
       a = self.LP.ac_applied * 100.0
       l = self.LP.ac_learned * 100.0
-      ac_str = f"纠{'右' if a >= 0 else '左'}{abs(a):.0f}cm(学纠{'右' if l >= 0 else '左'}{abs(l):.0f}cm)"
+      ac_str = f"纠{'右' if a >= 0 else '左'}{abs(a):.0f}cm(学纠{'右' if l >= 0 else '左'}{abs(l):.0f}cm"
+      if getattr(self.LP, "ac_saturated", False):
+        ac_str += "顶"
+      if getattr(self.LP, "ac_learn_frozen", False):
+        ac_str += "冻"
+      ac_str += ")"
     else:
       ac_str = "自动纠偏:关"
 
@@ -303,25 +293,37 @@ class LateralPlanner:
     extra = ""
     if self.lanelines_active:
       extra = f" | 偏移{self.LP.offset_total * 100.0:.1f}cm 弯速{turn_str}"
-    # 避让状态读数（独立模块：开关关闭/无目标时 avoid.debug 为空 ⇒ 零影响；
-    # 触发时底栏实时显示「避障+1.85m(借道)」/「避障待机(正前方·跟停)」等）
-    avoid_info = ""
-    try:
-      if self.avoid.debug:
-        avoid_info = f" | {self.avoid.debug}"
-    except Exception:
-      pass
     debugText = (
       f"{'车道线' if self.lanelines_active else '无车道线'} | " +
       lane_info +
       extra +
       f" | {ac_str}" +
       radar_left_info +
-      radar_right_info +
-      avoid_info
+      radar_right_info
     )
 
-    lateralPlan.latDebugText = debugText
+    # === 自动居中结构化读数 (2026-10-07) ===
+    # 供 UI 左下角「自动居中纠正记录」弹窗解析。UI 读本行时会把 [AC] 及之后整段剔除,
+    # 所以底部那行现有显示内容一个字符都不会变; 本片段只是搭同一字段的车。
+    # 格式: [AC]e=偏差cm,p=纠正cm,l=学习cm,s=状态码,q=学习码,w=车道宽m,t=学习饱和标志,
+    #           n=本次行程学习值最小cm,x=最大cm,f=学习已冻结,g=顶格时残留偏差cm
+    try:
+      _LP = self.LP
+      ac_seg = " [AC]e=%.1f,p=%.1f,l=%.1f,s=%d,q=%d,w=%.2f,t=%d,n=%.1f,x=%.1f,f=%d,g=%.1f" % (
+        float(getattr(_LP, "ac_error_now", 0.0)) * 100.0,
+        float(getattr(_LP, "ac_applied", 0.0)) * 100.0,
+        float(getattr(_LP, "ac_learned", 0.0)) * 100.0,
+        int(getattr(_LP, "ac_state", 0)),
+        int(getattr(_LP, "ac_learn_state", 0)),
+        float(getattr(_LP, "lane_width", 0.0)),
+        1 if getattr(_LP, "ac_saturated", False) else 0,
+        float(getattr(_LP, "ac_trip_learn_min", 0.0)) * 100.0,
+        float(getattr(_LP, "ac_trip_learn_max", 0.0)) * 100.0,
+        1 if getattr(_LP, "ac_learn_frozen", False) else 0,
+        float(getattr(_LP, "ac_sat_residual", 0.0)) * 100.0)
+    except Exception:
+      ac_seg = ""
+    lateralPlan.latDebugText = debugText + ac_seg
     #lateralPlan.latDebugText = self.latDebugText
     #lateralPlan.laneWidthLeft = float(self.DH.lane_width_left)
     #lateralPlan.laneWidthRight = float(self.DH.lane_width_right)

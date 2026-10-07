@@ -144,6 +144,13 @@ private:
   void togglesCarrot(int widgetIndex);
   void updateButtonStyles();
 
+  // 【2026-09-24 新增】红绿灯刹车 4 控件 + 分组头的「实验模式」显示闸门。
+  // 只控制显示: 实验模式开启才显示这几项, 关闭时整组(含分组标题)隐藏。
+  // 不改变任何参数、不影响 4 个控件的读写、不影响非实验模式下的任何行为。
+  void applyTlGate();
+  QWidget* tlGateHeader = nullptr;
+  QList<QWidget*> tlGateItems;
+
 public:
   explicit CarrotPanel(QWidget* parent = nullptr, int mode = 0);
 

@@ -115,7 +115,8 @@ def get_default_params():
     ("TrafficLightBrakeMode", "0"),
     ("TrafficLightBrakeMargin", "20"),
     ("TrafficLightBrakeConfirm", "8"),
-    ("TrafficLightBrakeDecel", "15"),
+    ("TrafficLightBrakeDecel", "30"),
+    ("TrafficLightRedConfirm", "40"),
     ("LaunchSmoothingMode", "0"),
     ("LaunchSmoothingInit", "15"),
     ("TrafficJamCreepMode", "0"),
@@ -125,32 +126,9 @@ def get_default_params():
     ("CurveAnticipateMode", "0"),
     ("CurveAnticipateDist", "60"),
     ("CurveAnticipateLatA", "28"),
-    ("CurveCenteringMode", "0"),
     ("PhantomBrakeGuardMode", "0"),
     ("PhantomBrakeGuardDist", "250"),
     ("PhantomBrakeGuardConfirm", "10"),
-    ("CurveCenteringStrength", "60"),
-    ("CurveCenteringCurv", "4"),
-    # 静止障碍横向避让 v2（Avoidance 模块；独立开关，默认关）
-    # 注：AvoidActive / AvoidNarrowCorridor 是运行期标志，由 avoidance.py 自己写，不在此设默认值
-    # 单位：TriggerDist=m, OffsetLimit/SafeGap/EdgeMargin/MinPassWidth=cm
-    ("AvoidObstacle", "0"),
-    ("AvoidTriggerDist", "35"),
-    ("AvoidOffsetLimit", "250"),
-    ("AvoidSafeGap", "60"),
-    ("AvoidEdgeMargin", "30"),
-    ("AvoidMinPassWidth", "200"),
-    # 避让最高速度（速度上限闸门；0=不限制；默认0=不限制，恢复"任何速度都避让"的原有行为）：超过此车速即关闭横向避让
-    ("AvoidMaxSpeed", "0"),
-    # 路沿额外余量（cm，默认30=0.30m）
-    ("AvoidEdgeExtra", "30"),
-    # 让位速率上限（×0.1m/s，默认15=1.5m/s）
-    ("AvoidMaxShiftRate", "15"),
-    # 「停车等待车辆」判定带宽（cm，默认60=0.60m）：障碍横向偏移小于此值视为挡在车道
-    # 正中央（等红灯/排队/正前方跟车）⇒ 交纵向跟停、不横移；大于此值才算"偏侧停靠的静止车"
-    ("AvoidCenterBand", "60"),
-    # 队列判据开关（1=启用，默认1）：障碍前方还有别的车时视为车流，不绕行
-    ("AvoidQueueCheck", "1"),
     # 丢目标缓冲（独立模块，默认关）：radar 丢小目标时用"虚拟 lead"顶住 MPC，防丢失后加速前冲
     ("LeadBufferEnable", "0"),
     # 缓冲时长（×0.1s，默认25=2.5s）

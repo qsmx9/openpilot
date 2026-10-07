@@ -83,26 +83,55 @@ class LanePlanner:
     # === 大路口动态偏移限制 (硬编码参数) ===
     self.curveOffsetLimit = 0.15       # 最大偏移限制(m), 0=关闭
     self.curveSpeedThreshold = 70      # curve_speed阈值, 超过此值视为大路口
+    self.curvature = 0.0               # 本帧实测曲率(1/m); 由 lateral_planner 每帧写入,
+                                       # 这里显式初始化以免首帧 getattr 落空(curve gate 判据要用)
 
     # === AutoCenter: 自动居中纠偏 (auto lane centering correction) ===
     # 0: off, 1: realtime correction only, 2: realtime + long-term learning (persisted)
     self.ac_enabled = 2
     self.ac_gain = 0.4                                        # P gain for realtime correction
-    self.ac_error_filtered = FirstOrderFilter(0.0, 1.0, DT_MDL)  # 1s low-pass on measured error
+    self.ac_error_filtered = FirstOrderFilter(0.0, 3.0, DT_MDL)  # 3s 低通 (2026-09-24 夜间居中: 1s->3s)
     self.ac_learned = 0.0                                     # slow-learned static offset (m)
     self.ac_learned_saved = 0.0
     self.ac_applied = 0.0                                     # rate-limited output (m)
     self.ac_param_ok = False                                  # params registered? else json file fallback
     self.ac_read_counter = 0
+    self.ac_cmd_counter = 0
     self.ac_save_counter = 0
+    self.ac_curve_gate = True                                 # 弯道暂停学习(默认开; 由 AutoLaneCorrectionCurveGate 覆盖)
+    # --- 诊断读数 (2026-10-07 新增: 供 UI「自动居中纠正记录」弹窗显示, 不影响任何控制逻辑) ---
+    self.ac_error_now = 0.0      # 本帧实测偏差(m): 正 = 车道中心在车右(即车偏左)
+    self.ac_state = 0            # 状态码: 0关/1低速/2无线/3宽异常/4变道/5干预/6已居中/7正在纠正
+    self.ac_learn_state = 0      # 学习码: 0未启用/1学习中/2弯道暂停/3无线暂停
+    self.ac_meas_ok = False      # 本帧测量是否可信
+    self.ac_saturated = False    # 学习值是否已顶到上限(提示用户存在未能补偿的持续偏差)
+    # --- 学习控制 / 行程读数 (2026-10-07 新增, 供「冻结/清零」与弹窗) ---
+    self.ac_learn_frozen = False # 学习已冻结(UI「冻结学习」开关; 冻结时保留当前学习值, 实时纠偏照常)
+    self.ac_trip_learn_min = 0.0 # 本次行程内学习值的最小/最大值(m), 供弹窗看出"在稳还是在漂"
+    self.ac_trip_learn_max = 0.0
+    self.ac_park_frames = 0      # 连续停车帧计数(用于切分行程)
+    self.ac_sat_residual = 0.0   # 顶格期间的残差慢平均(m): 顶格后仍剩这么大偏差没补上 ⇒ 判断上限是否真卡住
+    self.ac_sat_seen = False     # 本次行程内是否出现过顶格
     self._ac_load()
 
   AC_FILE = "/data/carrot_auto_center.json"
   AC_LEARN_LIMIT = 0.15      # max learned static offset (m)
   AC_P_LIMIT = 0.20          # max realtime correction (m)
   AC_TOTAL_LIMIT = 0.30      # max total correction (m)
-  AC_LEARN_TAU = 45.0        # learning time constant (s)
+  AC_LEARN_TAU = 20.0        # 学习时间常数(s): 2026-10-07 由 45 改为 20。
+                             #   依据(离线实测, 非推断): 学习目标不是"固定偏置", 而是在「小时」尺度上
+                             #   漂移——5天内 -9~+15cm 往返、同一天内就走完全程。45s 跟不上漂移速度。
   AC_RATE_LIMIT = 0.06       # max output slew rate (m/s)
+  AC_DEADBAND = 0.015       # 死区(m): 2026-10-07 由 0.06 改为 0.015。
+                            #   原 6cm 死区让"最后 6cm"完全没有实时修正(只剩慢积分兜底);
+                            #   实测 63.5% 的可学习帧落在 |e|<6cm 内 ⇒ 改为 1.5cm, 只压 3s 低通后的噪声。
+                            #   仅作用于 P 项输出(学习器输入早已不吃死区)。
+  AC_CURVE_GATE = 0.0015    # 学习曲率门限(1/m): |curvature| 超过则暂停学习
+                            #   原因: 弯道中模型车道中心存在系统偏差, 学进去会污染"静态偏置"(直道上反而歪)
+  AC_WIDTH_TOL = 1.0        # 车道宽一致性容差(m): 与平滑估计值差超过此值视为误锁相邻车道线, 本帧弃用
+  AC_SATURATED_RATIO = 0.97 # 学习值达到上限的该比例即视为"顶格"(UI 提示)
+  AC_PARK_RESET_SEC = 60.0  # 连续停车超过该秒数视为"新行程", 复位行程学习值区间读数
+  AC_SAT_TAU = 10.0         # "顶格时残留偏差"观测用的时间常数(s)
 
   def _ac_read_config(self):
     # prefer Params (needs key registration + rebuild); fallback to json file (no rebuild needed)
@@ -121,6 +150,50 @@ class LanePlanner:
           self.ac_gain = clamp(float(d.get("gain", 40)), 10, 100) * 0.01
       except Exception:
         pass
+    # 弯道暂停学习开关(独立读取; 读不到/未注册时保持默认开启 —— 更保守, 不会被弯道污染)
+    try:
+      self.ac_curve_gate = bool(self.params.get_bool("AutoLaneCorrectionCurveGate"))
+    except Exception:
+      self.ac_curve_gate = True
+    # 冻结学习开关(读不到/未注册 ⇒ get_int 返回 0 ⇒ 正常学习)
+    #   刻意用「非0才冻结」的语义: 安全默认是"继续学习", 绝不可能因为缺参数而静默停止学习。
+    try:
+      self.ac_learn_frozen = (self.params.get_int("AutoLaneCorrectionFreeze") != 0)
+    except Exception:
+      self.ac_learn_frozen = False
+
+  def _ac_poll_cmd(self):
+    # 一次性命令轮询(~1s 节拍, 由 update_auto_center 里的 ac_cmd_counter 驱动,
+    #   比 _ac_read_config 的 5s 更快 —— 用户在设置里点完不该干等 5 秒)。
+    #   为什么单独一个函数: 命令执行会改学习值, 不能让它在 __init__ 的 _ac_load 里被触发,
+    #   否则写盘是异步的, _ac_load 紧接着读回旧值会把"清零"覆盖掉。
+    try:
+      ac_cmd = self.params.get_int("AutoLaneCorrectionCmd")
+    except Exception:
+      return
+    if ac_cmd != 0:
+      self._ac_run_cmd(ac_cmd)
+
+  def _ac_run_cmd(self, cmd):
+    # 命令码: 1 = 清零学习值(并复位积分/滤波), 2 = 立即保存当前学习值
+    if cmd == 1:
+      self.ac_learned = 0.0
+      self.ac_learned_saved = 0.0
+      self.ac_error_filtered.x = 0.0
+      self.ac_applied = 0.0
+      self.ac_sat_residual = 0.0
+      self.ac_sat_seen = False
+      self.ac_trip_learn_min = 0.0
+      self.ac_trip_learn_max = 0.0
+      self._ac_save()
+    elif cmd == 2:
+      self._ac_save()
+    # 执行完必须把命令位写回 0, 否则每 1s 会重复执行一次。
+    #   用非阻塞写: 立刻写回旧值也没关系, cmd=1/2 都是幂等的。
+    try:
+      self.params.put_int_nonblocking("AutoLaneCorrectionCmd", 0)
+    except Exception:
+      pass
 
   def _ac_load(self):
     self._ac_read_config()
@@ -134,6 +207,10 @@ class LanePlanner:
     except Exception:
       self.ac_learned = 0.0
     self.ac_learned_saved = self.ac_learned
+    # 行程区间读数从"当前学习值"起步, 而不是 0 —— 否则弹窗会显示"本次行程 0.0~Xcm",
+    # 那个 0 是初始化默认值、不是真实最小值, 会让人误判"它从 0 一路学到 X"。
+    self.ac_trip_learn_min = self.ac_learned
+    self.ac_trip_learn_max = self.ac_learned
 
   def _ac_save(self):
     try:
@@ -147,47 +224,127 @@ class LanePlanner:
       pass
 
   def update_auto_center(self, CS, v_ego):
-    # re-read config every ~5s so panel/file changes apply on the fly
+    # 配置重读: ~5s 一次(100 帧; plannerd 跑 20Hz, DT_MDL=0.05, 故 1800 帧 = 90s 与保存节拍一致)
     self.ac_read_counter += 1
     if self.ac_read_counter >= 100:
       self.ac_read_counter = 0
       self._ac_read_config()
+    # 一次性命令用更快的节拍(~1s): 用户在设置里点完不该干等 5 秒
+    self.ac_cmd_counter += 1
+    if self.ac_cmd_counter >= 20:
+      self.ac_cmd_counter = 0
+      self._ac_poll_cmd()
+
+    # 学习饱和检测(供 UI 提示: 学习值已顶到上限 = 存在本功能补偿不完的持续偏差)
+    self.ac_saturated = abs(self.ac_learned) >= self.AC_LEARN_LIMIT * self.AC_SATURATED_RATIO
 
     if self.ac_enabled <= 0:
       self.ac_error_filtered.x = 0.0
       self.ac_applied = 0.0
+      self.ac_error_now = 0.0
+      self.ac_state = 0
+      self.ac_learn_state = 0
+      self.ac_meas_ok = False
       return 0.0
+
+    # --- 行程分割 + 学习值区间读数(纯诊断) ---
+    #   连续停车 > AC_PARK_RESET_SEC 视为新行程一次, 复位区间与顶格观测。
+    #   意义: 弹窗只看"当前值"分不清"在收敛"还是"在绕圈"; 有了本次行程的 min/max 就能一眼判断。
+    if v_ego * 3.6 < 1.0:
+      self.ac_park_frames += 1
+      if self.ac_park_frames == int(self.AC_PARK_RESET_SEC / DT_MDL):
+        self.ac_trip_learn_min = self.ac_learned
+        self.ac_trip_learn_max = self.ac_learned
+        self.ac_sat_residual = 0.0
+        self.ac_sat_seen = False
+    else:
+      self.ac_park_frames = 0
+    if self.ac_learned < self.ac_trip_learn_min:
+      self.ac_trip_learn_min = self.ac_learned
+    if self.ac_learned > self.ac_trip_learn_max:
+      self.ac_trip_learn_max = self.ac_learned
 
     # measurement gating: only trust confident, sane lane lines while driving straight-ish
     lane_width_now = self.rll_y[0] - self.lll_y[0]
-    meas_ok = (
-      self.lll_prob > 0.5 and self.rll_prob > 0.5 and
-      self.lll_std < 0.3 and self.rll_std < 0.3 and
-      2.5 < lane_width_now < 4.6 and
-      self.lane_change_multiplier > 0.5 and
-      not CS.steeringPressed and
-      v_ego * 3.6 > 15.0
-    )
+    lines_ok = (self.lll_prob > 0.35 and self.rll_prob > 0.35 and   # 夜间居中: 0.5->0.35
+                self.lll_std < 0.5 and self.rll_std < 0.5)          # 夜间居中: 0.3->0.5
+    # 车道宽合理性: 绝对范围 + 与平滑估计值的一致性
+    #   只靠绝对范围挡不住"把相邻车道线误当本车道"(那也可能落在 2.5~4.6m), 但与本车道上帧估计值差很大
+    width_ok = 2.5 < lane_width_now < 4.6
+    lane_width_ref = getattr(self, "lane_width", 0.0)
+    if width_ok and 1.5 < lane_width_ref < 5.0:
+      width_ok = abs(lane_width_now - lane_width_ref) < self.AC_WIDTH_TOL
+
+    slow = v_ego * 3.6 <= 15.0
+    steering = bool(CS.steeringPressed)
+    changing = self.lane_change_multiplier <= 0.5
+
+    # --- 状态码: 让 UI 说清"正在纠正什么 / 为什么没纠正" ---
+    if slow:
+      self.ac_state = 1
+    elif changing:
+      self.ac_state = 4
+    elif steering:
+      self.ac_state = 5
+    elif not lines_ok:
+      self.ac_state = 2
+    elif not width_ok:
+      self.ac_state = 3
+    else:
+      self.ac_state = 6            # 下面按误差大小细化为 6(已居中) / 7(正在纠正)
+
+    meas_ok = (not slow) and (not changing) and (not steering) and lines_ok and width_ok
+    self.ac_meas_ok = meas_ok
 
     if meas_ok:
       # e > 0: lane center is to the right of car -> shift path right (y positive = right in this fork)
       error = clamp((self.lll_y[0] + self.rll_y[0]) * 0.5, -0.6, 0.6)
+      self.ac_error_now = error
+      # 学习器改吃「未死区」的滤波值:
+      #   旧实现先把 <6cm 的偏差归零再喂积分器 ⇒ 积分器在接近中心时输入恒为 0,
+      #   永远学不到 6cm 以内的精细补偿, 居中精度被死区卡死在 ±6cm。
+      #   滤波本身是 3s 低通(约 60 帧平均), 抗噪足够; 死区只保留在 P 项输出上。
       self.ac_error_filtered.update(error)
-      if self.ac_enabled >= 2:
+      # 曲率门限: 弯道中"模型预测的车道中心"有系统偏差(曲率越大越明显),
+      #   学进去会把弯道特性污染成静态偏置, 结果直道上反而歪。只在近似直道时学习。
+      cur = abs(getattr(self, "curvature", 0.0))
+      curve_ok = (not self.ac_curve_gate) or (cur < self.AC_CURVE_GATE)
+      if self.ac_enabled >= 2 and self.ac_learn_frozen:
+        self.ac_learn_state = 4        # 学习暂停(用户手动冻结; 保留当前学习值, 实时纠偏照常)
+      elif self.ac_enabled >= 2 and curve_ok:
         # slow integrator removes steady-state bias (camera mount / steering bias)
         self.ac_learned = clamp(self.ac_learned + self.ac_error_filtered.x * (DT_MDL / self.AC_LEARN_TAU),
                                 -self.AC_LEARN_LIMIT, self.AC_LEARN_LIMIT)
+        self.ac_learn_state = 1
+      elif self.ac_enabled >= 2:
+        self.ac_learn_state = 2        # 学习暂停(弯道)
+      else:
+        self.ac_learn_state = 0
+      # --- 顶格观测(纯诊断, 不参与任何控制) ---
+      #   学习值已顶到上限、却仍有偏差 ⇒ "上限"很可能就是卡住它的东西。
+      #   把这里的残留偏差做 10s 慢平均给 UI 看:
+      #     接近 0    = 顶格无害(该补的已经补完了, 只是数值停在刻度顶端)
+      #     明显非 0  = 上限真的不够(这就是本功能补偿不完的那个持续偏差)
+      if self.ac_saturated:
+        self.ac_sat_residual += (error - self.ac_sat_residual) * (DT_MDL / self.AC_SAT_TAU)
+        self.ac_sat_seen = True
+      if self.ac_state == 6 and abs(error) >= self.AC_DEADBAND:
+        self.ac_state = 7              # 正在纠正
     else:
       self.ac_error_filtered.update(0.0)
+      self.ac_error_now = 0.0
+      self.ac_learn_state = 3 if self.ac_enabled >= 2 else 0
 
-    # persist learned offset every ~30s when changed > 5mm
+    # persist learned offset every ~90s when changed > 8mm
+    #   旧值 600帧(30s)/5mm: 学习期间约每 30s 就写一次 params 文件, 长期白占 flash 写入; 放宽到 90s/8mm
     self.ac_save_counter += 1
-    if self.ac_save_counter >= 600:
+    if self.ac_save_counter >= 1800:
       self.ac_save_counter = 0
-      if abs(self.ac_learned - self.ac_learned_saved) > 0.005:
+      if abs(self.ac_learned - self.ac_learned_saved) > 0.008:
         self._ac_save()
 
-    p_term = clamp(self.ac_error_filtered.x * self.ac_gain, -self.AC_P_LIMIT, self.AC_P_LIMIT)
+    p_err = self.ac_error_filtered.x if abs(self.ac_error_filtered.x) >= self.AC_DEADBAND else 0.0
+    p_term = clamp(p_err * self.ac_gain, -self.AC_P_LIMIT, self.AC_P_LIMIT)
     target = clamp(p_term + self.ac_learned, -self.AC_TOTAL_LIMIT, self.AC_TOTAL_LIMIT)
     max_step = self.AC_RATE_LIMIT * DT_MDL
     self.ac_applied = clamp(target, self.ac_applied - max_step, self.ac_applied + max_step)

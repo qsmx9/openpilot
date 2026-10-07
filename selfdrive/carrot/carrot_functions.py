@@ -7,6 +7,10 @@ from openpilot.common.realtime import DT_MDL
 from openpilot.common.conversions import Conversions as CV
 from openpilot.common.filter_simple import MyMovingAverage
 from openpilot.selfdrive.selfdrived.events import Events
+try:
+  from opendbc.car.interfaces import ACCEL_MIN   # 本车最大制动减速度(负值), 仅实验模式修正使用
+except Exception:
+  ACCEL_MIN = -4.0
 
 EventName = log.OnroadEvent.EventName
 LaneChangeState = log.LaneChangeState
@@ -30,6 +34,13 @@ class DrivingMode(Enum):
 
   def __str__(self):
     return self.name
+
+# === 前车驶离自动起步（2026-09-23）===
+# 场景：前车停车 → 我们跟停 → 前车驶离。原状态机没有这条出口，车会一直停在原地。
+LEAD_DEPART_V = 1.0        # m/s  前车速度高于此值 ⇒ 认为前车已在驶离
+LEAD_DEPART_D = 3.0        # m    前车距离大于此值 ⇒ 认为已离开贴身范围
+LEAD_DEPART_CONFIRM = 5    # 帧   需连续满足的帧数（100Hz ⇒ 50ms）
+
 
 class TrafficState(Enum):
   off = 0
@@ -70,6 +81,7 @@ class CarrotPlanner:
     self.actual_stop_distance = 0.0
     #self.debugLongText = ""
     self.stopping_count = 0
+    self.lead_depart_count = 0
     self.traffic_starting_count = 0
     self.user_stop_distance = -1
 
@@ -77,6 +89,11 @@ class CarrotPlanner:
 
     self.startSignCount = 0
     self.stopSignCount = 0
+    # 红灯判定确认时间(秒)，默认 0.4s
+    self.tlRedConfirm = 0.4
+    # 是否处于实验模式(blended)。以下「红绿灯刹车」修正均限定实验模式生效,
+    # 正常模式(acc) 完全走原逻辑, 不受任何影响。
+    self.expMode = False
 
     self.stop_distance = 6.0
     self.trafficStopDistanceAdjust = 2.0 #params.get_float("TrafficStopDistanceAdjust") / 100.
@@ -176,6 +193,13 @@ class CarrotPlanner:
       self.j_lead_factor = self.params.get_float("JLeadFactor3") / 100.
       self.eco_over_speed = self.params.get_int("CruiseEcoControl")
       self.autoNaviSpeedDecelRate = float(self.params.get_int("AutoNaviSpeedDecelRate")) * 0.01
+
+    elif self.params_count == 50:
+      # 红灯判定确认时间(x0.01s)，默认40=0.4s
+      try:
+        self.tlRedConfirm = max(0.05, self.params.get_int("TrafficLightRedConfirm") * 0.01)
+      except Exception:
+        self.tlRedConfirm = 0.4
       self.comfortBrake = self.params.get_float("ComfortBrake") / 100.
 
     elif self.params_count >= 100:
@@ -300,7 +324,14 @@ class CarrotPlanner:
     self.stopSignCount = self.stopSignCount + 1 if stopSign else 0
     self.startSignCount = self.startSignCount + 1 if startSign and not stopSign else 0
 
-    if self.stopSignCount * DT_MDL > 0.0:
+    # 【仅实验模式】原判据 stopSignCount*DT_MDL > 0.0 ⇒ 1 帧(50ms)即判红灯, 而「绿灯」
+    # 却要 4 帧 ⇒ 极不对称, 路口/斑马线处模型瞬时预测减速 1 帧就误判 ⇒ 无前车也刹停。
+    # 正常模式保持原实现完全不变。
+    if self.expMode:
+      is_red = self.stopSignCount * DT_MDL >= self.tlRedConfirm
+    else:
+      is_red = self.stopSignCount * DT_MDL > 0.0
+    if is_red:
       self.trafficState = TrafficState.red
     elif self.startSignCount * DT_MDL > 0.2:
       self.trafficState = TrafficState.green
@@ -367,6 +398,11 @@ class CarrotPlanner:
 
     self.events = Events()
     carstate = sm['carState']
+    # 【实验模式闸门】blended=实验模式; 取不到时退回 mode 参数(planner 传 self.mpc.mode)。
+    try:
+      self.expMode = bool(sm['selfdriveState'].experimentalMode)
+    except Exception:
+      self.expMode = (mode == 'blended')
     vCluRatio = carstate.vCluRatio
     #controlsState = sm['controlsState']
     radarstate = sm['radarState']
@@ -444,10 +480,28 @@ class CarrotPlanner:
       if trafficState_last in [TrafficState.off, TrafficState.red] and self.trafficState == TrafficState.green:
         self.events.add(EventName.trafficSignChanged)
     elif self.xState == XState.e2eStopped:
+      # === 前车驶离自动起步（2026-09-23 新增）===
+      # 原逻辑从"已停稳"出去只有三条路：①踩油门 ②前车近于2m(切跟车态) ③绿灯。
+      # 于是"前车停→我们跟停→前车走"这个纯跟车场景没有任何出口，只能原地等踩油门
+      # （实测：最后一段停车 14.3s、有前车占比 100%、踩油门 0% ⇒ 卡死在原地）。
+      # 现补第四条：前车确实在动(vLead > LEAD_DEPART_V)且已离开贴身范围
+      # (dRel > LEAD_DEPART_D)、且不是红灯 ⇒ 连续 LEAD_DEPART_CONFIRM 帧确认后自动跟随起步。
+      # 安全边界：红灯期间不生效(仍交红绿灯逻辑)；前车"蹭一下"不满足连续帧数，不会误起步。
+      if (lead_detected and self.trafficState != TrafficState.red
+          and radarstate.leadOne.vLead > LEAD_DEPART_V and radarstate.leadOne.dRel > LEAD_DEPART_D):
+        self.lead_depart_count += 1
+      else:
+        self.lead_depart_count = 0
+
       if carstate.gasPressed:
         self.xState = XState.e2eCruise #XState.e2ePrepare
       elif lead_detected and (radarstate.leadOne.dRel - stop_model_x) < 2.0:
         self.xState = XState.lead
+      elif self.lead_depart_count >= LEAD_DEPART_CONFIRM:
+        # 前车已驶离 ⇒ 自动跟随起步（与"踩油门起步"同一个出口）
+        self.xState = XState.e2eCruise
+        self.traffic_starting_count = 10.0 / DT_MDL
+        self.lead_depart_count = 0
       elif self.stopping_count == 0:
         if self.trafficState == TrafficState.green and not self.carrot_stay_stop and not carstate.leftBlinker and self.trafficLightDetectMode != 1:
           #self.xState = XState.e2ePrepare
@@ -541,7 +595,15 @@ class CarrotPlanner:
         offset = self.red_light_dist_offset * w
       stop_dist = max(0, stop_dist + offset)
     #new
-    stop_dist = max(stop_dist, v_ego ** 2 / (self.comfort_brake * 2))
+    # 【仅实验模式 · 2026-09-24 根因修复】原实现用「舒适减速度」(ComfortBrake≈2.16 m/s²)
+    # 当停车点物理下限 ⇒ 50km/h 时下限 = v²/(2*2.16) ≈ 44.7m, 而 e2eStop 分支本身故意
+    # 把瞄准点收紧到 0.7~0.85×xStop(≈35m) ⇒ max() 反而把停车点推到停止线之外约 10m,
+    # 且减速度被死死压在 2.16(实测 -2.2) ⇒ 「刹车软绵绵 + 越过停止线闯红灯继续往前跑」。
+    # 物理下限的唯一正当用途是「不要求物理上做不到的停车距离」, 应取本车最大制动能力。
+    if self.expMode:
+      stop_dist = max(stop_dist, v_ego ** 2 / (abs(ACCEL_MIN) * 2))
+    else:
+      stop_dist = max(stop_dist, v_ego ** 2 / (self.comfort_brake * 2))   # 正常模式: 原实现
 
     self.v_cruise = v_cruise
     self.stop_dist = stop_dist

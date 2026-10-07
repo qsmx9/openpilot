@@ -37,6 +37,29 @@ CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
 ALLOW_THROTTLE_THRESHOLD = 0.5
 MIN_ALLOW_THROTTLE_SPEED = 2.5
 
+# ===== e2e(视觉)兜底安全限幅（F+）=====
+# 背景：blended(实验模式)分支原为 output = min(mpc, e2e) / shouldStop = e2e or mpc。
+#   e2e 即 modelV2.action 的 desiredAcceleration / desiredVelocity / shouldStop。
+# 风险：模型误报(幻影目标)会逐帧直接变成制动/停车指令。
+# 依据（硬证据）：e2e 不参与 MPC 内部状态 —— v_desired_filter / prev_a / set_weights
+#   均不读它；全仓库只有本文件 update() 末尾这几行消费它。
+#   ⇒ 限幅后"误报持续 1 帧还是 100 帧"总伤害是同一个固定值，**不会累积**。
+# 设计：方向全部单向更保守（只会更早减速/更易停），幅度设硬上限。
+E2E_MAX_DELTA = 1.0     # m/s^2  视觉最多比 MPC 更负多少（约 0.10g）
+E2E_V_MAX_DELTA = 3.0   # m/s    视觉最多把速度目标压低多少（约 10.8km/h）
+E2E_SLOW_A_TH = -0.3    # m/s^2  认定"模型确实在减速"的加速度阈值
+E2E_STOP_CONFIRM = 5    # 帧     视觉 shouldStop 需连续确认帧数（100Hz ⇒ 50ms）
+
+# ===== F+ v3：停车意图解锁（2026-09-23）=====
+# 实测（54618 帧）：行进中(v>5km/h)视觉 shouldStop 从未为 True（0 帧）——
+#   模型表达"要停"靠的是 desiredVelocity 趋 0，不是 shouldStop。
+#   而 v2 的速度门控最多只让 3 m/s ⇒ 实测巡航 50km/h 遇红灯时目标速度被卡在
+#   43.8km/h，PID 误差仅 -3 m/s ⇒ 表现为"有刹车动作但力度极弱 / 刹不住 / 闯红灯"。
+# 修复：识别到"停车意图"并连续确认后，解除两项限幅，让视觉目标速度直接生效。
+E2E_PARK_V_TH = 2.0     # m/s   视觉期望速度低于此值 ⇒ 判为停车意图（7.2km/h）
+E2E_PARK_A_TH = -1.2    # m/s^2 视觉期望加速度低于此值 ⇒ 判为停车意图
+E2E_PARK_CONFIRM = 10   # 帧    停车意图需连续确认帧数（100Hz ⇒ 100ms，抗单帧误报）
+
 # Lookup table for turns
 _A_TOTAL_MAX_V = [1.7, 3.2]
 _A_TOTAL_MAX_BP = [20., 40.]
@@ -119,6 +142,9 @@ class LongitudinalPlanner(LongitudinalPlannerSP): #new
     self._exp_off_frames = 20  # 连续20帧才退出（更保守）
     self._exp_hyst_speed = 5.0  # km/h 迟滞
     self._exp_hyst_latA = 0.5  # m/s^2 迟滞
+    #new: e2e(视觉)兜底安全限幅 —— 视觉 shouldStop 连续确认计数器（F+）
+    self._e2e_stop_cnt = 0
+    self._e2e_park_cnt = 0   # F+ v3: 停车意图连续确认计数器
     #new
 
   @staticmethod
@@ -184,7 +210,12 @@ class LongitudinalPlanner(LongitudinalPlannerSP): #new
     )
 
     enter_exp = cond_speed_on or cond_lat_on
-    exit_exp = cond_speed_off and cond_lat_off
+    # 退出判据修正（F+）：未启用的通道（对应参数 <= 0 时其 cond_*_off 恒为 False）
+    #   视为"不阻塞退出"。否则只设一个参数 ⇒ exit_exp 恒 False ⇒ 进去出不来
+    #   （而写入的是持久化参数 ExperimentalMode ⇒ 断电重启仍处在实验模式）。
+    #   安全性：两参数都为 0 时走上面的"动态实验模式"分支，不会落到这里，故无副作用。
+    exit_exp = (cond_speed_off or self.DynamicExperimentalSpeed <= 0) and \
+               (cond_lat_off or self.DynamicExperimentalLatA <= 0)
 
     # ========= 时间确认（防抖）=========
     if enter_exp:
@@ -247,11 +278,6 @@ class LongitudinalPlanner(LongitudinalPlannerSP): #new
 
     long_control_off = sm['controlsState'].longControlState == LongCtrlState.off
     force_slow_decel = sm['controlsState'].forceDecel
-    # 障碍物走廊过窄(夹心无法通过)标志, 由 lateral_planner 实时写入 Params
-    avoid_narrow = bool(self.sys_params.get_int("AvoidNarrowCorridor"))
-    # 避让激活标志(单侧偏移中), 由 lateral_planner 实时写入 Params
-    avoid_active = bool(self.sys_params.get_int("AvoidActive"))
-
     # Reset current state when not engaged, or user is controlling the speed
     reset_state = long_control_off if self.CP.openpilotLongitudinalControl else not sm['selfdriveState'].enabled
     # PCM cruise speed may be updated a few cycles later, check if initialized
@@ -294,13 +320,6 @@ class LongitudinalPlanner(LongitudinalPlannerSP): #new
     if force_slow_decel:
       # 系统级强制减速（如车距极近）: 仍直接 v_cruise=0, 这是明确的停止意图
       v_cruise = 0.0
-    elif avoid_narrow:
-      # 横向推断"夹心窄廊": 不强行锁 0 (避免锁死 ACC), 仅减速到 5km/h 慢行尝试,
-      # 是否真正停车由 carrot 的 xState 状态机与 shouldStop 决定
-      v_cruise = min(v_cruise, 5.0 / 3.6)
-    elif avoid_active and v_cruise > 0.0:
-      # 避让激活时纵向轻减速(~15%), 提升侧向避让余量、降低碰撞风险
-      v_cruise *= 0.85
     # clip limits, cannot init MPC outside of bounds
     accel_limits_turns[0] = min(accel_limits_turns[0], self.a_desired + 0.05)
     accel_limits_turns[1] = max(accel_limits_turns[1], self.a_desired - 0.05)
@@ -321,6 +340,13 @@ class LongitudinalPlanner(LongitudinalPlannerSP): #new
     self.la.update(carrot, sm, v_ego, v_cruise)
     # === 入弯预备减速（独立模块，默认关=零影响）===
     self.ca.update(carrot, sm, v_ego, v_cruise)
+    # ★ 修复接线断点：三个辅助模块(tlb/la/ca)修改的是 carrot.v_cruise 属性，
+    #   但 mpc.update 用的是 L270 已绑定的局部 v_cruise（旧值），属性改动不会反向刷新它。
+    #   => assist 抬的起步/红绿灯/入弯目标速度根本没进 MPC 设定速度，功能等于没生效。
+    #   重绑局部 v_cruise（单位同为 m/s，与 carrot.v_cruise 一致），让辅助模块真正驱动纵向。
+    #   系统级强制减速(force_slow_decel)除外：明确停车意图，assist 不得覆盖（安全）。
+    if not force_slow_decel:
+      v_cruise = carrot.v_cruise
     # radar_state_for_mpc 已在上方由「丢目标缓冲」模块给出（模块关闭时即原对象，零影响）
     self.mpc.update(carrot, reset_state, radar_state_for_mpc, v_cruise, x, v, a, j, personality=sm['selfdriveState'].personality)
 
@@ -365,14 +391,40 @@ class LongitudinalPlanner(LongitudinalPlannerSP): #new
       output_a_target = output_a_target_mpc
       output_v_target_now = output_v_target_mpc
       self.output_should_stop = output_should_stop_mpc
+      self._e2e_stop_cnt = 0
+      self._e2e_park_cnt = 0
     else:
-      output_a_target = min(output_a_target_mpc, output_a_target_e2e)
-      output_v_target_now = min(output_v_target_mpc, output_v_target_now_e2e)
-      self.output_should_stop = output_should_stop_e2e or output_should_stop_mpc
-
-    # 走廊过窄: 标记应停车(配合 v_cruise=低速让 mpc 减速停车意图更明确), 不强制 0
-    if avoid_narrow:
-      self.output_should_stop = True
+      # ===== F+：e2e(视觉)兜底 + 安全限幅（全部落在 blended 分支 ⇒ 关实验模式即原样）=====
+      # ① 停车意图识别（F+ v3，2026-09-23）：实测 54618 帧里"行进中(v>5km/h)"
+      #    视觉 shouldStop 从未为 True（0 帧）—— 模型表达"要停"靠的是
+      #    desiredVelocity 趋 0，而不是 shouldStop。因此只按 shouldStop 兜底不够：
+      #    速度门控最多只让 3 m/s，实测巡航 50km/h 遇红灯时目标速度被卡在 43.8km/h
+      #    ⇒ PID 误差仅 -3 m/s ⇒ "有刹车动作但力度极弱、刹不住、闯红灯"。
+      park_intent = (output_v_target_now_e2e < E2E_PARK_V_TH) or (output_a_target_e2e < E2E_PARK_A_TH)
+      self._e2e_park_cnt = min(self._e2e_park_cnt + 1, E2E_PARK_CONFIRM) if park_intent else 0
+      park_confirmed = self._e2e_park_cnt >= E2E_PARK_CONFIRM
+      if park_confirmed:
+        # 停车意图已连续确认 100ms ⇒ 解除两项限幅，视觉目标速度/减速度直接生效。
+        #   ★ 安全边界不变：MPC 的 a_min/a_max、CRASH_DISTANCE、DANGER_ZONE_COST
+        #     以及 longcontrol 的 PID 限幅全部照旧；且 e2e 不参与 MPC 内部状态
+        #     ⇒ 即使视觉误报，伤害上限固定、不随时间累积。
+        output_a_target = min(output_a_target_mpc, output_a_target_e2e)
+        output_v_target_now = min(output_v_target_mpc, output_v_target_now_e2e)
+      else:
+        # ② 加速度：保留"模型更早减速"的能力，但最多比 MPC 更负 E2E_MAX_DELTA。
+        #    依据：e2e 不参与 MPC 内部状态 ⇒ 误报不随时间累积，总伤害上限固定。
+        output_a_target = max(output_a_target_mpc - E2E_MAX_DELTA,
+                              min(output_a_target_mpc, output_a_target_e2e))
+        # ③ 速度门控（修"提速肉/卡 30"）：仅在"模型确实在减速意图"时才允许压低速度目标，
+        #    且最多让 E2E_V_MAX_DELTA。实测本车 desiredVelocity P50=25.5km/h，
+        #    且有 66.8% 的帧低于巡航设定 ⇒ 无条件 min() 会让车永远提不上速。
+        if output_a_target_e2e < E2E_SLOW_A_TH and output_v_target_now_e2e < output_v_target_mpc:
+          output_v_target_now = max(output_v_target_mpc - E2E_V_MAX_DELTA, output_v_target_now_e2e)
+        else:
+          output_v_target_now = output_v_target_mpc
+      # ④ shouldStop：布尔量无法限幅，是唯一残留风险口 ⇒ 视觉侧需连续多帧确认
+      self._e2e_stop_cnt = min(self._e2e_stop_cnt + 1, E2E_STOP_CONFIRM) if output_should_stop_e2e else 0
+      self.output_should_stop = (self._e2e_stop_cnt >= E2E_STOP_CONFIRM) or output_should_stop_mpc
 
     #for idx in range(2):
     #  accel_clip[idx] = np.clip(accel_clip[idx], self.prev_accel_clip[idx] - 0.05, self.prev_accel_clip[idx] + 0.05)

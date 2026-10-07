@@ -303,7 +303,12 @@ class LongitudinalMpc:
       constraint_cost_weights = [LIMIT_COST, LIMIT_COST, LIMIT_COST, DANGER_ZONE_COST]
     elif self.mode == 'blended':
       a_change_cost = 40.0 if prev_accel_constraint else 0
-      cost_weights = [0., 0.1, 0.2, 5.0, a_change_cost, 1.0]
+      # ★ F+：把"距离软代价"补回 acc 同值（原为 0.）。
+      #   原 blended 对"离障碍物多远"不给任何软梯度 ⇒ 只剩约束项兜底（该约束带 slack，
+      #   权重 DANGER_ZONE_COST=100），跟车时失去 acc 那种"提前收油"的能力。
+      #   补回后 blended 在"距离"这一维度与 acc 数学等价，同时保留视觉兜底与平滑项。
+      #   （blended 的 lead_danger_factor=1.0 > acc 的 0.8 ⇒ 约束位置本身更保守，两者叠加）
+      cost_weights = [X_EGO_OBSTACLE_COST, 0.1, 0.2, 5.0, a_change_cost, 1.0]
       constraint_cost_weights = [LIMIT_COST, LIMIT_COST, LIMIT_COST, DANGER_ZONE_COST]
     else:
       raise NotImplementedError(f'Planner mode {self.mode} not recognized in planner cost set')
@@ -502,8 +507,37 @@ class LongitudinalMpc:
     elif mode == 'blended':
       self.params[:,5] = 1.0
 
+      # === 2026-09-23 修复：blended(实验模式) 下「设定速度」丢失硬约束 ===
+      # 原逻辑只把 v_cruise 放进 cruise_target(位置参考)，而该参考对应的 X_EGO_COST 权重为 0，
+      # 等于完全没有约束力 => 定速巡航在实验模式下失效。
+      # 实测(2026-09-23 定速 50)：vEgo(轮速域) 稳定 50.5kph ≈ 设定值本身，而 vCluRatio≈0.914，
+      # 故真车比设定高约 9%(仪表 55.3 / 独立手机 GNSS 55)；非实验模式则一致。
+      # 修法：照搬 acc 分支同样方式构造 cruise_obstacle 并加入 x_obstacles，
+      # 使设定速度重新成为「速度上限」硬约束。E2E 仍可自由低于该上限。
+      v_lower = v_ego + (T_IDXS * self.cruise_min_a * 1.05)
+      v_upper = v_ego + (T_IDXS * self.max_a * 1.05)
+      v_cruise_clipped = np.clip(v_cruise * np.ones(N+1), v_lower, v_upper)
+      cruise_obstacle = np.cumsum(T_DIFFS * v_cruise_clipped) + get_safe_obstacle_distance(
+        v_cruise_clipped, t_follow, comfort_brake, stop_distance)
+
+      # === 2026-09-24 修复: blended(实验模式)下「红灯停止线」完全没有约束 ===
+      # 根因: 本分支 x_obstacles 只有 [lead0, lead1, cruise], 缺 acc 分支的 x2; 且上方
+      #   mode=='blended' 强制 stop_x = 1000.0(禁用) ⇒ carrot.stop_dist 从未参与求解,
+      #   红灯只能靠 v_cruise=0 软参考 ⇒ 减速度软绵绵、越过停止线、继续往前跑。
+      # 修法: 照搬 acc 分支用 carrot.stop_dist 构造 traffic_stop_obstacle, 但仅在 carrot
+      #   状态机处于 e2eStop/e2eStopped(信号停车)时启用, 其余保持 1000(等效禁用),
+      #   因此不影响 E2E 正常行驶。仅实验模式受影响, 正常模式(acc)分支一字未动。
+      if carrot.xState in (XState.e2eStop, XState.e2eStopped):
+        adjust_dist = carrot.trafficStopDistanceAdjust if v_ego > 0.1 else -2.0
+        tl_stop_obstacle = get_traffic_stop_obstacle_distance(carrot.stop_dist, cruise_obstacle[0], adjust_dist)
+      else:
+        tl_stop_obstacle = 1000.0
+      x2 = tl_stop_obstacle * np.ones(N+1)
+
       x_obstacles = np.column_stack([lead_0_obstacle,
-                                     lead_1_obstacle])
+                                     lead_1_obstacle,
+                                     cruise_obstacle,
+                                     x2])
       cruise_target = T_IDXS * np.clip(v_cruise, v_ego - 2.0, 1e3) + x[0]
       xforward = ((v[1:] + v[:-1]) / 2) * (T_IDXS[1:] - T_IDXS[:-1])
       x = np.cumsum(np.insert(xforward, 0, x[0]))
@@ -517,7 +551,20 @@ class LongitudinalMpc:
       raise NotImplementedError(f'Planner mode {self.mode} not recognized in planner update')
 
     self.yref[:,1] = x
-    self.yref[:,2] = v
+    # ===【2026-09-24】追速动机修复（仅实验模式/ blended 生效）===
+    # 根因：原本 yref[:,2] = v，而 v 是 modelV2 的 E2E 预测速度 —— 它永远 ≈ 当前车速，
+    #       与你设的定速无关 ⇒ MPC 的速度参考就是「保持当前速度」⇒ 定速巡航不加速
+    #       （实测 4 段：参考 37.4/37.2/26.7/36.9 vs 设定 50/40/50/70，aTarget 中位 0.00）。
+    # 改法：只在 blended 分支、且设定速度高于当前车速超过 3km/h 时，
+    #       把速度参考抬到「当前速度 + 3km/h」（渐进加速，不直接跳到设定值）。
+    # 安全性：位置参考 yref[:,1] 不动（仍 min(E2E轨迹, 设定线)）⇒ E2E 减速能力不受影响；
+    #         权重表不动；跟车/约束/舒适项全部不动；acc 分支逐字节等价（走 else 原样赋值）。
+    if self.mode == 'blended' and v_cruise > 0.0 and v_cruise > v_ego + 0.8333:
+      # 0.8333 m/s = 3 km/h 死区；不直接跳到 v_cruise，避免加速度前馈过冲
+      v_ref_target = min(v_cruise, v_ego + 0.8333)
+      self.yref[:,2] = np.maximum(v, v_ref_target)
+    else:
+      self.yref[:,2] = v
     self.yref[:,3] = a
     self.yref[:,5] = j
     for i in range(N):

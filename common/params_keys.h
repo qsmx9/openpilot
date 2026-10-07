@@ -155,6 +155,8 @@ inline static std::unordered_map<std::string, uint32_t> keys = {
     {"LaneLineColor", PERSISTENT},    // lane line color (0=stock white, 1-7=red orange yellow green cyan blue purple)
     {"UIRadarLeadBoxColor", PERSISTENT},   // 雷达前车框颜色 0-35 (2橙默认)
     {"UIVisionLeadBoxColor", PERSISTENT},  // 视觉前车框颜色 0-35 (6蓝默认)
+    {"UIBsdColor", PERSISTENT},            // <-- 新增：盲区监控颜色 0-36 (1红默认, 36=冰蓝)
+    {"UIBsdWarnColor", PERSISTENT},        // <-- 新增：盲区变道预警颜色 0-36 (14金默认)
     {"SkipBootBuild", PERSISTENT},    // skip openpilot build at boot (touch prebuilt when ON)
     {"CleanViewMode", PERSISTENT},       // <-- 新增：高速净屏(0关/1隐藏图标/2极净屏)
     {"CleanViewSpeed", PERSISTENT},      // <-- 新增：净屏触发车速(km/h)
@@ -230,10 +232,11 @@ inline static std::unordered_map<std::string, uint32_t> keys = {
     {"TrafficJamCreepSpeed", PERSISTENT},
     {"LeadDepartureMode", PERSISTENT},
     {"LeadDepartureSpeed", PERSISTENT},
+    {"StartFollowMode", PERSISTENT},
+    {"StartFollowDist", PERSISTENT},
     {"CurveAnticipateMode", PERSISTENT},
     {"CurveAnticipateDist", PERSISTENT},
     {"CurveAnticipateLatA", PERSISTENT},
-    {"CurveCenteringMode", PERSISTENT},
     {"PhantomBrakeGuardMode", PERSISTENT},
     {"PhantomBrakeGuardDist", PERSISTENT},
     {"PhantomBrakeGuardConfirm", PERSISTENT},
@@ -253,8 +256,6 @@ inline static std::unordered_map<std::string, uint32_t> keys = {
     {"BeepStartup", PERSISTENT},
     {"BeepEngage", PERSISTENT},
     {"BeepDisengage", PERSISTENT},
-    {"CurveCenteringStrength", PERSISTENT},
-    {"CurveCenteringCurv", PERSISTENT},
     {"SteerActuatorDelay", PERSISTENT},
     {"CruiseOnDist", PERSISTENT},
     {"CruiseMaxVals0", PERSISTENT},
@@ -312,6 +313,10 @@ inline static std::unordered_map<std::string, uint32_t> keys = {
     {"AutoLaneCorrection", PERSISTENT},
     {"AutoLaneCorrectionGain", PERSISTENT},
     {"AutoLaneCorrectionLearned", PERSISTENT},
+    {"AutoLaneCorrectionCurveGate", PERSISTENT},   // 自动居中: 弯道暂停学习开关(防弯道系统偏差被学成静态偏置)
+    {"AutoCenterPanel", PERSISTENT},               // 左下角「自动居中纠正记录」弹窗开关
+    {"AutoLaneCorrectionFreeze", PERSISTENT},        // 自动居中: 冻结学习(0=正常学习[默认], 1=冻结; 冻结时保留当前学习值, 实时纠偏照常)
+    {"AutoLaneCorrectionCmd", PERSISTENT},             // 自动居中: 一次性命令(0=无[默认] 1=清零学习值 2=立即保存); planner 执行后自动写回0
     {"LateralTorqueCustom", PERSISTENT},
     {"LateralTorqueAccelFactor", PERSISTENT},
     {"LateralTorqueFriction", PERSISTENT},
@@ -346,19 +351,6 @@ inline static std::unordered_map<std::string, uint32_t> keys = {
     {"NNFFLite", PERSISTENT},
     {"NNFFModelName", CLEAR_ON_OFFROAD_TRANSITION},
 
-    {"AvoidObstacle", PERSISTENT},
-    {"AvoidTriggerDist", PERSISTENT},
-    {"AvoidOffsetLimit", PERSISTENT},
-    {"AvoidSafeGap", PERSISTENT},
-    {"AvoidEdgeMargin", PERSISTENT},
-    {"AvoidMinPassWidth", PERSISTENT},
-    {"AvoidMaxSpeed", PERSISTENT},
-    {"AvoidEdgeExtra", PERSISTENT},
-    {"AvoidMaxShiftRate", PERSISTENT},
-    {"AvoidCenterBand", PERSISTENT},
-    {"AvoidQueueCheck", PERSISTENT},
-    {"AvoidNarrowCorridor", PERSISTENT},
-    {"AvoidActive", PERSISTENT},
     {"LeadBufferEnable", PERSISTENT},
     {"LeadBufferTime", PERSISTENT},
     {"LeadBufferMaxDist", PERSISTENT},
@@ -452,5 +444,6 @@ inline static std::unordered_map<std::string, uint32_t> keys = {
     {"TurnArcEnabled", PERSISTENT},
     {"SteerArcColor", PERSISTENT},
     {"EdgeCenteringEnabled", PERSISTENT},
-    //new
+    // 红绿灯: 红灯判定确认时间(x0.01s, 默认40=0.4s)
+    {"TrafficLightRedConfirm", PERSISTENT},
 };

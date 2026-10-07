@@ -52,7 +52,11 @@
 #define BOLD "KaiGenGothicKR-Bold"//"Inter-Bold"//"sans-bold"
 
 
-static const NVGcolor ui_box_colors[36] = {
+// ★ 2026-09-23: 色板由 36 项扩为 37 项, 末尾新增 36 号「冰蓝」。
+//   理由: 0~35 是「前车框颜色」已上线在用的色号, 语义不能动(插入会导致索引位移,
+//   用户已设置的颜色会整体错位), 所以只能追加。盲区监控颜色与它共用同一张表,
+//   这样两处菜单色号含义一致, 不需要记两套。
+static const NVGcolor ui_box_colors[37] = {
   nvgRGBA(255,255,255,255),  // 0 白
   nvgRGBA(255,0,0,255),  // 1 红
   nvgRGBA(255,175,3,255),  // 2 橙
@@ -89,14 +93,17 @@ static const NVGcolor ui_box_colors[36] = {
   nvgRGBA(230,230,250,255),  // 33 薰衣草
   nvgRGBA(192,192,192,255),  // 34 银灰
   nvgRGBA(105,105,105,255),  // 35 深灰
+  nvgRGBA(165,242,243,255),  // 36 冰蓝 ★新增(2026-09-23): 冷色低刺激, 夜间/隧道里比红金更耐看, 供[盲区监控颜色]选用
 };
 static inline NVGcolor boxColorA(const NVGcolor &c, int a) {
   return nvgRGBA((int)(c.r*255+0.5), (int)(c.g*255+0.5), (int)(c.b*255+0.5), a);
 }
+// 读取颜色参数并夹紧到合法色号。0~35 = 原色板; 36 = 新增冰蓝。
+// 越界/非法字符串一律回落到调用方给的默认值 def, 保证参数被写坏时不会画成黑线。
 static int boxColorIdx(const char* key, int def) {
   std::string s = Params().get(key);
   if (s.empty()) return def;
-  try { int v = std::stoi(s); return (v >= 0 && v <= 35) ? v : def; }
+  try { int v = std::stoi(s); return (v >= 0 && v <= 36) ? v : def; }
   catch (...) { return def; }
 }
 
@@ -1633,6 +1640,16 @@ class BlindSpotDrawer : ModelDrawer{
 protected:
     QPolygonF lane_barrier_vertices[2];
 
+    // ── 盲区监控颜色(2026-09-23 新增: 参数可调) ────────────────────────────────
+    // 原版在这里硬编码两个颜色: 有车 = 红(255,0,0,150) / 变道预警 = 金(255,215,0,150)。
+    // 现改为读参数, 色号共用「前车框颜色」那张 ui_box_colors 色板(0~35 语义不变,
+    // 36 = 本次新增的冰蓝), 默认值刻意取回原色号 ⇒ 什么都不设时与改前逐像素一致。
+    //   UIBsdColor     盲区确实有车时, 车身两侧车道外侧的警示描边色, 默认 1(红)
+    //   UIBsdWarnColor 打灯变道且侧后方有车接近时的提前预警色,     默认 14(金)
+    int  bsd_color_idx      = 1;    // ← 参数 UIBsdColor
+    int  bsd_warn_color_idx = 14;   // ← 参数 UIBsdWarnColor
+    int  bsd_params_count   = 0;    // 倒计时, 归零时重读参数(约每 30 帧一次)
+
 protected:
     void ui_draw_bsd(const UIState* s, const QPolygonF& vd, NVGcolor* color, bool right) {
         int index = vd.length();
@@ -1678,8 +1695,19 @@ public:
     void draw(const UIState* s) {
         if (!make_data(s)) return;
 
-        NVGcolor color = nvgRGBA(255, 0, 0, 150);
-        NVGcolor color2 = nvgRGBA(255, 215, 0, 150);
+        // 颜色参数重读: 本函数每帧都跑, 而读参数是一次文件读取(每帧读纯属浪费 IO),
+        // 所以每 30 帧重读一次 —— 约 1~1.5 秒, 改完参数观感上仍是"立刻变色"。
+        // 参数不存在时 boxColorIdx 返回默认值, 即原版的红/金, 行为与改前一致。
+        if (--bsd_params_count <= 0) {
+            bsd_color_idx      = boxColorIdx("UIBsdColor",      1);   // 0~36, 默认 1=红(原版)
+            bsd_warn_color_idx = boxColorIdx("UIBsdWarnColor", 14);   // 0~36, 默认 14=金(原版)
+            bsd_params_count   = 30;
+        }
+
+        // boxColorA 只换 alpha、保留 RGB ⇒ 默认色号下与原硬编码的
+        // nvgRGBA(255,0,0,150) / nvgRGBA(255,215,0,150) 取值完全相同。
+        NVGcolor color  = boxColorA(ui_box_colors[bsd_color_idx], 150);
+        NVGcolor color2 = boxColorA(ui_box_colors[bsd_warn_color_idx], 150);
 
         SubMaster& sm = *(s->sm);
         auto car_state = sm["carState"].getCarState();
@@ -3297,6 +3325,241 @@ public:
         draw_label_value(center_x[5], "剩余存储 ", str, disk_color);
     }
 
+    // ==================== 自动居中纠正记录弹窗 (2026-10-07) ====================
+    // 数据来源: lateralPlan.latDebugText 末尾由 lateral_planner.py 追加的 [AC] 结构化片段。
+    // 为什么不新增 cereal 字段: 新增字段要改 capnp 并重编整个 cereal, 而 latDebugText 本来就是
+    // 每帧给 UI 读的现成通道(底部那行就是它)。UI 读同一字段时把 [AC] 之后整段剔除,
+    // 底部原显示一个字符都不变 ⇒ 零回归、零 cereal 改动。
+    // 开关: AutoCenterPanel (0=不显示, 1=显示)。自动居中关闭时状态显示「已关闭」。
+    struct AutoCenterInfo {
+        bool  valid = false;
+        float err_cm = 0.f;      // 实测偏差(cm): 正 = 车偏左(即车道中心在车右)
+        float adj_cm = 0.f;      // 当前施加的纠正(cm): 正 = 向右推
+        float learn_cm = 0.f;    // 已学习的静态偏置(cm)
+        int   state = 0;         // 0关 1低速 2无线 3宽异常 4变道 5干预 6已居中 7纠正中
+        int   learn_state = 0;   // 0未启用 1学习中 2弯道暂停 3测量暂停 4手动冻结
+        float lane_w = 0.f;
+        bool  saturated = false; // 学习值已顶到上限
+        // --- 2026-10-07 扩展段 ---
+        float trip_min_cm = 0.f; // 本次行程(停车>60s 分割)学习值的最小/最大值(cm)
+        float trip_max_cm = 0.f;
+        bool  frozen = false;    // 学习已被手动冻结
+        float sat_res_cm = 0.f;  // 顶格期间残留的偏差(cm): 学到上限之后还剩这么多没补上
+    };
+
+    AutoCenterInfo parseAutoCenterInfo(const char* text) {
+        AutoCenterInfo info;
+        const char* p = strstr(text, "[AC]");
+        if (p == nullptr) return info;
+        float e = 0.f, a = 0.f, l = 0.f, w = 0.f;
+        int s = 0, q = 0, t = 0;
+        if (sscanf(p + 4, "e=%f,p=%f,l=%f,s=%d,q=%d,w=%f,t=%d", &e, &a, &l, &s, &q, &w, &t) == 7) {
+            info.valid = true;
+            info.err_cm = e;      info.adj_cm = a;       info.learn_cm = l;
+            info.state = s;       info.learn_state = q;  info.lane_w = w;
+            info.saturated = (t != 0);
+        }
+        // 扩展段(n/x/f/g)单独解析: 这样即使某天真跑在旧格式上, 上面那 7 个基本字段也不受影响
+        float n = 0.f, x = 0.f, g = 0.f;
+        int f = 0;
+        const char* pe = strstr(p + 4, ",n=");
+        if (pe != nullptr && sscanf(pe + 1, "n=%f,x=%f,f=%d,g=%f", &n, &x, &f, &g) == 4) {
+            info.trip_min_cm = n;  info.trip_max_cm = x;
+            info.frozen = (f != 0); info.sat_res_cm = g;
+        }
+        return info;
+    }
+
+    static const char* acStateText(int st) {
+        switch (st) {
+            case 0:  return "已关闭";
+            case 1:  return "车速不足";
+            case 2:  return "无有效车道线";
+            case 3:  return "车道宽异常";
+            case 4:  return "变道暂停";
+            case 5:  return "方向盘干预";
+            case 6:  return "已居中";
+            case 7:  return "正在纠正";
+            default: return "待机";
+        }
+    }
+
+    static const char* acLearnText(int q) {
+        switch (q) {
+            case 0:  return "未启用学习";
+            case 1:  return "学习中";
+            case 2:  return "学习暂停-弯道";
+            case 3:  return "学习暂停-测量";
+            case 4:  return "学习已冻结";
+            default: return "待机";
+        }
+    }
+
+    void drawAutoCenterPanel(UIState* s) {
+        // ---- 学习值历史缓冲(UI 侧自己维护, planner 侧零改动) ----
+        //  为什么值得加: 只看"当前学习值"分不清它在收敛还是在绕圈 —— 离线实测该值会在几小时内
+        //  来回跑 ±10cm(5天窗口 -9~+15cm), 只有曲线能一眼看出来。采样节拍用 millis_since_boot
+        //  固定 0.5s, 与 UI 帧率无关。函数内 static ⇒ 零初始化, 且本函数只有一个实例调用。
+        static const int AC_HIST_N = 360;      // 360 * 0.5s = 约 3 分钟
+        static float  ac_hist[AC_HIST_N];
+        static int    ac_hist_head = 0;        // 下一个写入位置
+        static int    ac_hist_len  = 0;        // 已写入的有效点数
+        static double ac_hist_t    = 0.0;      // 上次采样时刻(ms)
+        static bool   ac_hist_filled = false;
+
+        if (!s->scene.started) {
+            // 不在行驶 → 清空曲线, 保证看到的永远是"本次上电后的一段"
+            ac_hist_head = 0; ac_hist_len = 0; ac_hist_t = 0.0; ac_hist_filled = false;
+            return;
+        }
+        if (params.getInt("AutoCenterPanel") <= 0) return;
+        SubMaster& sm = *(s->sm);
+        if (!sm.alive("lateralPlan")) return;
+
+        const auto lat_plan = sm["lateralPlan"].getLateralPlan();
+        std::string dbg = lat_plan.getLatDebugText().cStr();
+        AutoCenterInfo ac = parseAutoCenterInfo(dbg.c_str());
+        if (!ac.valid) return;
+
+        if (!ac_hist_filled) {
+            // 首帧用当前值铺满整条缓冲: 否则曲线会从 0 爬升, 看起来像"突然学到 14cm"
+            for (int i = 0; i < AC_HIST_N; i++) ac_hist[i] = ac.learn_cm;
+            ac_hist_head = 0; ac_hist_len = AC_HIST_N; ac_hist_t = 0.0;
+            ac_hist_filled = true;
+        }
+        const double now_ms = millis_since_boot();
+        if (ac_hist_t == 0.0 || now_ms - ac_hist_t >= 500.0) {
+            ac_hist_t = now_ms;
+            ac_hist[ac_hist_head] = ac.learn_cm;
+            ac_hist_head = (ac_hist_head + 1) % AC_HIST_N;
+            if (ac_hist_len < AC_HIST_N) ac_hist_len++;
+        }
+
+        // 位置: 左下角, 紧贴底部 6 项状态栏上方(栏高 50 + 底边距 3, 见 drawBottomBar)
+        // 让位逻辑: 左下角那块可能已被别的元素占用, 面板按占用情况右移, 保证都完整可见 ——
+        //   · 设备状态面板 ShowDeviceState>0 : 方块 x≈20~495 (drawDeviceState)  → 右移到 520
+        //   · 时钟显示     ShowDateTime>0    : "HH:MM" x≈40~320, y≈815~930 (drawDateTime 硬编码 180,920 字号100)
+        //   两者都关时贴最左边 22, 视觉最紧凑。
+        const int px_occupied = (params.getInt("ShowDeviceState") > 0) ? 520
+                              : ((params.getInt("ShowDateTime") > 0) ? 360 : 22);
+        const int px = px_occupied;
+        const int bar_h = 50;
+        const int bar_y = s->fb_h - bar_h - 3;
+        const int pw = 600;
+        const int title_h = 48;
+        const int row_h = 40;
+        const int curve_label_h = 26;   // 「学习值曲线 + 本次行程区间」那一行
+        const int curve_plot_h  = 56;   // 曲线绘图区(±15cm 铺满半高)
+        const int ph = title_h + row_h * 4 + curve_label_h + curve_plot_h + 12;
+        const int py = bar_y - 16 - ph;
+
+        // 背板 + 左侧状态色条
+        ui_fill_rect(s->vg, {px, py, pw, ph}, nvgRGBA(0, 0, 0, 155), 14, 0);
+        NVGcolor accent;
+        switch (ac.state) {
+            case 7:  accent = COLOR_GREEN; break;              // 正在纠正
+            case 6:  accent = COLOR_GREEN_ALPHA(170); break;   // 已居中
+            case 0:  accent = COLOR_WHITE_ALPHA(90); break;    // 已关闭
+            default: accent = COLOR_YELLOW; break;             // 各种暂停
+        }
+        ui_fill_rect(s->vg, {px, py, 8, ph}, accent, 0, 0);
+
+        const int fs = 30;
+        nvgTextAlign(s->vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+        ui_draw_text(s, px + 24, py + title_h / 2, "自动居中纠正记录", 32, COLOR_WHITE_ALPHA(235), BOLD);
+
+        char str[128];
+        auto drawRow = [&](int idx, const char* label, const char* value, NVGcolor vcolor) {
+            float y = py + title_h + row_h * idx + row_h * 0.5f;
+            ui_draw_text(s, px + 24, y, label, fs, COLOR_WHITE_ALPHA(165), BOLD);
+            ui_draw_text(s, px + 150, y, value, fs, vcolor, BOLD);
+        };
+
+        // 行1 偏离: 颜色随大小分级
+        const float ae = fabsf(ac.err_cm);
+        NVGcolor ec = (ae < 5.f) ? COLOR_GREEN : ((ae < 15.f) ? COLOR_YELLOW : COLOR_ORANGE);
+        snprintf(str, sizeof(str), "%s %.1fcm", (ac.err_cm >= 0.f) ? "偏左" : "偏右", ae);
+        drawRow(0, "偏离", str, ec);
+
+        // 行2 纠正
+        const float aa = fabsf(ac.adj_cm);
+        snprintf(str, sizeof(str), "%s %.1fcm", (ac.adj_cm >= 0.f) ? "向右" : "向左", aa);
+        drawRow(1, "纠正", str, (aa > 0.5f) ? COLOR_GREEN : COLOR_WHITE_ALPHA(140));
+
+        // 行3 学习: 「顶格」在实测里不等于故障 —— 顶格时残留偏差有时只有 2cm、有时 9cm,
+        //   所以不再用红色报警(红字会让人误判成"坏了"), 改成黄色 + 直接写出真正有判断价值的信息:
+        //   到上限时还差多少 / 已冻结 / 本次行程的漂移区间。
+        const float al = fabsf(ac.learn_cm);
+        const char* ldir = (ac.learn_cm >= 0.f) ? "向右" : "向左";
+        NVGcolor lcolor = COLOR_WHITE_ALPHA(210);
+        if (ac.frozen) {
+            snprintf(str, sizeof(str), "%s %.1fcm 已冻结", ldir, al);
+            lcolor = COLOR_WHITE_ALPHA(140);
+        } else if (ac.saturated) {
+            const float sg = fabsf(ac.sat_res_cm);
+            if (sg >= 0.5f) {
+                snprintf(str, sizeof(str), "%s %.1fcm 到上限·还差%.1fcm", ldir, al, sg);
+            } else {
+                snprintf(str, sizeof(str), "%s %.1fcm 到上限·已够用", ldir, al);
+            }
+            lcolor = COLOR_YELLOW;
+        } else {
+            snprintf(str, sizeof(str), "%s %.1fcm", ldir, al);
+        }
+        drawRow(2, "学习", str, lcolor);
+
+        // 行4 状态: 「正在纠正什么 / 为什么没纠正」+ 学习状态
+        snprintf(str, sizeof(str), "%s · %s", acStateText(ac.state), acLearnText(ac.learn_state));
+        drawRow(3, "状态", str, (ac.state == 7) ? COLOR_GREEN_ALPHA(230) : COLOR_WHITE_ALPHA(200));
+
+        // ---- 行5: 学习值曲线 + 本次行程区间 ----
+        //  Rect1 的成员是 int, 所以填充矩形一律用整型, 曲线本身用 float 做插值。
+        const int   cx0_i = px + 24;
+        const int   cw_i  = pw - 48;
+        const int   lab_y = py + title_h + row_h * 4;
+        const int   plt_y = lab_y + curve_label_h;
+        const float cx0   = float(cx0_i);
+        const float cw    = float(cw_i);
+        const float plt_yf = float(plt_y);
+
+        snprintf(str, sizeof(str), "学习值曲线  本次行程 %.1f ~ %.1fcm", ac.trip_min_cm, ac.trip_max_cm);
+        ui_draw_text(s, cx0, float(lab_y) + curve_label_h * 0.5f, str, 22, COLOR_WHITE_ALPHA(150), BOLD);
+
+        ui_fill_rect(s->vg, {cx0_i, plt_y, cw_i, curve_plot_h}, nvgRGBA(255, 255, 255, 16), 8, 0);
+
+        const float mid_y  = plt_yf + curve_plot_h * 0.5f;
+        const float vscale = (curve_plot_h * 0.5f - 4.f) / 15.0f;   // 15 = AC_LEARN_LIMIT(cm)
+
+        auto hline = [&](float yy, NVGcolor c, float w) {
+            nvgBeginPath(s->vg);
+            nvgMoveTo(s->vg, cx0, yy);
+            nvgLineTo(s->vg, cx0 + cw, yy);
+            nvgStrokeColor(s->vg, c);
+            nvgStrokeWidth(s->vg, w);
+            nvgStroke(s->vg);
+        };
+        hline(mid_y, COLOR_WHITE_ALPHA(70), 1.0f);                      // 0 中线 = 不需要纠正
+        hline(mid_y - 15.0f * vscale, COLOR_OCHRE_ALPHA(140), 1.5f);    // 学习上限(向右)
+        hline(mid_y + 15.0f * vscale, COLOR_OCHRE_ALPHA(140), 1.5f);    // 学习上限(向左)
+
+        if (ac_hist_len >= 2) {
+            const float dx = cw / float(AC_HIST_N - 1);
+            nvgBeginPath(s->vg);
+            for (int i = 0; i < ac_hist_len; i++) {
+                const int idx = (ac_hist_head - ac_hist_len + i + AC_HIST_N * 2) % AC_HIST_N;
+                float v = ac_hist[idx];
+                if (v >  15.0f) v =  15.0f;
+                if (v < -15.0f) v = -15.0f;
+                const float xx = cx0 + dx * float(i);        // 最新点在右端
+                const float yy = mid_y - v * vscale;         // 正 = 向右推 ⇒ 画在中线上方
+                if (i == 0) nvgMoveTo(s->vg, xx, yy); else nvgLineTo(s->vg, xx, yy);
+            }
+            nvgStrokeColor(s->vg, COLOR_GREEN);
+            nvgStrokeWidth(s->vg, 2.5f);
+            nvgStroke(s->vg);
+        }
+    }
+
     void drawBottomBarOnBorder(NVGcontext* vg, int w, int h, UIState* s) {
         if (!s->scene.started) return;
 
@@ -3499,7 +3762,7 @@ void ui_draw(UIState *s, ModelRenderer* model_renderer, int w, int h) {
   bool draw_carrot = drawCarrot.updateState(s);
 
   // === 高速净屏（独立开关，默认关=零影响）===
-  // clean_hud : 车速达标后隐藏所有信息图标
+  // clean_hud : 车速达标后隐藏所有信息图标（★盲区监控已移出本块，不再受净屏影响）
   // clean_path: Mode=2 极净屏时，连路径与车道线一并隐藏
   const bool clean_hud = s->clean_view_active;
   const bool clean_path = s->clean_view_active && s->clean_view_mode >= 2;
@@ -3524,8 +3787,6 @@ void ui_draw(UIState *s, ModelRenderer* model_renderer, int w, int h) {
 
 
   drawPlot.draw(s);
-
-  drawBlindSpot.draw(s);
 
   if(draw_carrot)
     drawCarrot.drawRadarInfo(s);
@@ -3557,10 +3818,20 @@ void ui_draw(UIState *s, ModelRenderer* model_renderer, int w, int h) {
 
   drawCarrot.drawBottomBar(s);
 
+  // 左下角「自动居中纠正记录」弹窗(独立开关 AutoCenterPanel; 关闭时整段 no-op)
+  drawCarrot.drawAutoCenterPanel(s);
+
   drawTurnInfo.draw(s);
 
   ui_draw_text_a2(s);
   }   // === 高速净屏：信息图标块结束 ===
+
+  // === 盲区监控：安全提示，任何情况下都显示（含画面清爽 / 极净屏）===
+  // 本调用原先在上一行的 !clean_hud 块内，高速净屏会把它一并藏掉。但盲区监控是
+  // 变道安全项（侧后方有车时车身两侧那两条警示描边），净屏状态下把它藏起来等于
+  // 让人盲变道，所以 2026-09-23 按需求移出该块：清爽模式 1/2 下照常显示。
+  // 颜色由 UIBsdColor / UIBsdWarnColor 控制（0~36 色号，见 BlindSpotDrawer）。
+  drawBlindSpot.draw(s);
 
   ui_draw_alert(s);   // 安全底线：报警提示任何情况下都显示
 
@@ -3597,6 +3868,7 @@ class BorderDrawer {
 protected:
     float   a_ego_width = 0.0;
     float steering_angle_pos = 0.0;
+    Params  params_memory{ "/dev/shm/params" };   // 本机 IP 由 carrot_man.py 写入此处
     NVGcolor get_tpms_color(float tpms) {
         if (tpms < 5 || tpms > 60) // N/A
             return COLOR_GREEN;
@@ -3696,21 +3968,25 @@ public:
         char bottom[256] = "";
         const auto lat_plan = sm["lateralPlan"].getLateralPlan();
         str = lat_plan.getLatDebugText().cStr();
+        // 剔除尾部 [AC] 结构化片段 —— 它只供左下角「自动居中纠正记录」弹窗解析,
+        // 不属于本行要显示的文字; 截掉后本行显示与改动前完全一致。
+        {
+            const int ac_pos = str.indexOf("[AC]");
+            if (ac_pos >= 0) str = str.left(ac_pos).trimmed();
+        }
         strcpy(bottom, str.toStdString().c_str());
 
         // bottom_left
         char bottom_left[256] = "CP-Dev晚風V260921";
 
-        // bottom_right
-        // Params params_memory = Params("/dev/shm/params");
-        // if (false && carrot_man_debug[0] != 0 && params.getInt("ShowDebugUI") > 0) {
-        //     strcpy(bottom_right, carrot_man_debug);
-        // }
-        // else {
-        //     QString ipAddress = QString::fromStdString(params_memory.get("NetworkAddress"));
-            //extern QString gitBranch;
-        //     sprintf(bottom_right, "%s", ipAddress.toStdString().c_str());
-        // }
+        // bottom_right —— 右下角显示本机 IP
+        char bottom_right[256] = "";
+        {
+            const std::string ip = params_memory.get("NetworkAddress");
+            if (!ip.empty() && ip != "0.0.0.0") {
+                snprintf(bottom_right, sizeof(bottom_right), "%s", ip.c_str());
+            }
+        }
 
         int text_margin = 30;
         // top
@@ -3729,8 +4005,8 @@ public:
         nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_BOTTOM);
         ui_draw_text_vg(vg, 20, h, bottom_left, 30, COLOR_WHITE, BOLD);
         // bottom right
-        // nvgTextAlign(vg, NVG_ALIGN_RIGHT | NVG_ALIGN_BOTTOM);
-        // ui_draw_text_vg(vg, w- text_margin, h, bottom_right, 30, COLOR_WHITE, BOLD);
+        nvgTextAlign(vg, NVG_ALIGN_RIGHT | NVG_ALIGN_BOTTOM);
+        ui_draw_text_vg(vg, w - text_margin, h, bottom_right, 30, COLOR_WHITE, BOLD);
 
         //drawTpms(s, w, h);
     }
