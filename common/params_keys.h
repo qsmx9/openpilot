@@ -315,7 +315,6 @@ inline static std::unordered_map<std::string, uint32_t> keys = {
     {"AutoLaneCorrectionLearned", PERSISTENT},
     {"AutoLaneCorrectionCurveGate", PERSISTENT},   // 自动居中: 弯道暂停学习开关(防弯道系统偏差被学成静态偏置)
     {"AutoCenterPanel", PERSISTENT},               // 左下角「自动居中纠正记录」弹窗开关
-    {"AutoLaneCorrectionFreeze", PERSISTENT},        // 自动居中: 冻结学习(0=正常学习[默认], 1=冻结; 冻结时保留当前学习值, 实时纠偏照常)
     {"AutoLaneCorrectionCmd", PERSISTENT},             // 自动居中: 一次性命令(0=无[默认] 1=清零学习值 2=立即保存); planner 执行后自动写回0
     {"LateralTorqueCustom", PERSISTENT},
     {"LateralTorqueAccelFactor", PERSISTENT},

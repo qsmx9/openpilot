@@ -105,13 +105,14 @@ class LanePlanner:
     self.ac_learn_state = 0      # 学习码: 0未启用/1学习中/2弯道暂停/3无线暂停
     self.ac_meas_ok = False      # 本帧测量是否可信
     self.ac_saturated = False    # 学习值是否已顶到上限(提示用户存在未能补偿的持续偏差)
-    # --- 学习控制 / 行程读数 (2026-10-07 新增, 供「冻结/清零」与弹窗) ---
-    self.ac_learn_frozen = False # 学习已冻结(UI「冻结学习」开关; 冻结时保留当前学习值, 实时纠偏照常)
+    # --- 学习控制 / 行程读数 (2026-10-07 新增, 供「清零」与弹窗) ---
     self.ac_trip_learn_min = 0.0 # 本次行程内学习值的最小/最大值(m), 供弹窗看出"在稳还是在漂"
     self.ac_trip_learn_max = 0.0
     self.ac_park_frames = 0      # 连续停车帧计数(用于切分行程)
     self.ac_sat_residual = 0.0   # 顶格期间的残差慢平均(m): 顶格后仍剩这么大偏差没补上 ⇒ 判断上限是否真卡住
     self.ac_sat_seen = False     # 本次行程内是否出现过顶格
+    self.ac_sat_frames = 0       # 连续顶格帧数(顶格保护用)
+    self.ac_releasing = False    # 正在"脱顶": 把学习值从上限缓慢拉回中性
     self._ac_load()
 
   AC_FILE = "/data/carrot_auto_center.json"
@@ -131,6 +132,12 @@ class LanePlanner:
   AC_WIDTH_TOL = 1.0        # 车道宽一致性容差(m): 与平滑估计值差超过此值视为误锁相邻车道线, 本帧弃用
   AC_SATURATED_RATIO = 0.97 # 学习值达到上限的该比例即视为"顶格"(UI 提示)
   AC_PARK_RESET_SEC = 60.0  # 连续停车超过该秒数视为"新行程", 复位行程学习值区间读数
+  # --- 顶格保护 (2026-10-08 新增; 代码层常量, 不新增 UI 参数、不新增 [AC] 字段) ---
+  AC_SAT_HYST = 0.90         # 顶格标志滞回: 进入用 AC_SATURATED_RATIO(0.97), 退出用本值
+                             #   原单阈值在 0.97 边缘会反复翻转, 顶格标志(UI 的"顶"字)会抖
+  AC_SAT_HOLD_SEC = 15.0     # 顶格持续超过该秒数才判定"该脱顶"(避免刚碰上限就被拉回)
+  AC_SAT_RELEASE_TAU = 30.0  # 脱顶时学习值朝 0 回退的时间常数(s); 越大回得越慢
+  AC_SAT_RELEASE_UNTIL = 0.6 # 回退到限幅的该比例即停止脱顶, 恢复正常积分
   AC_SAT_TAU = 10.0         # "顶格时残留偏差"观测用的时间常数(s)
 
   def _ac_read_config(self):
@@ -155,12 +162,6 @@ class LanePlanner:
       self.ac_curve_gate = bool(self.params.get_bool("AutoLaneCorrectionCurveGate"))
     except Exception:
       self.ac_curve_gate = True
-    # 冻结学习开关(读不到/未注册 ⇒ get_int 返回 0 ⇒ 正常学习)
-    #   刻意用「非0才冻结」的语义: 安全默认是"继续学习", 绝不可能因为缺参数而静默停止学习。
-    try:
-      self.ac_learn_frozen = (self.params.get_int("AutoLaneCorrectionFreeze") != 0)
-    except Exception:
-      self.ac_learn_frozen = False
 
   def _ac_poll_cmd(self):
     # 一次性命令轮询(~1s 节拍, 由 update_auto_center 里的 ac_cmd_counter 驱动,
@@ -183,6 +184,8 @@ class LanePlanner:
       self.ac_applied = 0.0
       self.ac_sat_residual = 0.0
       self.ac_sat_seen = False
+      self.ac_sat_frames = 0
+      self.ac_releasing = False
       self.ac_trip_learn_min = 0.0
       self.ac_trip_learn_max = 0.0
       self._ac_save()
@@ -236,7 +239,12 @@ class LanePlanner:
       self._ac_poll_cmd()
 
     # 学习饱和检测(供 UI 提示: 学习值已顶到上限 = 存在本功能补偿不完的持续偏差)
-    self.ac_saturated = abs(self.ac_learned) >= self.AC_LEARN_LIMIT * self.AC_SATURATED_RATIO
+    #   2026-10-08: 加滞回 —— 进入 0.97 / 退出 0.90。单阈值在边缘来回翻转会让
+    #   顶格标志(以及顶格保护的计时)反复起停, 脱顶刚启动就被判"不顶了"而中断。
+    if self.ac_saturated:
+      self.ac_saturated = abs(self.ac_learned) > self.AC_LEARN_LIMIT * self.AC_SAT_HYST
+    else:
+      self.ac_saturated = abs(self.ac_learned) >= self.AC_LEARN_LIMIT * self.AC_SATURATED_RATIO
 
     if self.ac_enabled <= 0:
       self.ac_error_filtered.x = 0.0
@@ -246,6 +254,16 @@ class LanePlanner:
       self.ac_learn_state = 0
       self.ac_meas_ok = False
       return 0.0
+
+    # --- 顶格计时(顶格保护): 顶格持续够久 ⇒ 从这一帧起进入"受控脱顶" ---
+    #   放在 enabled<=0 早退之后: 功能关掉时不做任何计时/状态累积。
+    #   只加计时不做动作 —— 动作放在下面"meas_ok"分支里, 与积分互斥。
+    if self.ac_saturated:
+      self.ac_sat_frames += 1
+      if self.ac_sat_frames >= int(self.AC_SAT_HOLD_SEC / DT_MDL):
+        self.ac_releasing = True
+    elif not self.ac_releasing:
+      self.ac_sat_frames = 0
 
     # --- 行程分割 + 学习值区间读数(纯诊断) ---
     #   连续停车 > AC_PARK_RESET_SEC 视为新行程一次, 复位区间与顶格观测。
@@ -257,6 +275,8 @@ class LanePlanner:
         self.ac_trip_learn_max = self.ac_learned
         self.ac_sat_residual = 0.0
         self.ac_sat_seen = False
+        self.ac_sat_frames = 0
+        self.ac_releasing = False
     else:
       self.ac_park_frames = 0
     if self.ac_learned < self.ac_trip_learn_min:
@@ -309,8 +329,18 @@ class LanePlanner:
       #   学进去会把弯道特性污染成静态偏置, 结果直道上反而歪。只在近似直道时学习。
       cur = abs(getattr(self, "curvature", 0.0))
       curve_ok = (not self.ac_curve_gate) or (cur < self.AC_CURVE_GATE)
-      if self.ac_enabled >= 2 and self.ac_learn_frozen:
-        self.ac_learn_state = 4        # 学习暂停(用户手动冻结; 保留当前学习值, 实时纠偏照常)
+      if self.ac_enabled >= 2 and curve_ok and self.ac_releasing:
+        # === 顶格保护 (2026-10-08): 顶格过久 ⇒ 受控"脱顶" ===
+        #   背景(route 94 离线实测): 学习值在 ±15cm 内来回跑, 最后停在刻度顶端不动,
+        #   停车 16 分钟也不退 ⇒ 下次上车先带着 15cm 的注入量起步。
+        #   只靠 clamp 是"进得去、出不来": 想从中性重新学, 得先反向走完整刻度, 极慢。
+        #   做法: 按 AC_SAT_RELEASE_TAU 把学习值朝 0 缓慢拉, 拉回限幅 60% 以内即恢复学习。
+        #   与积分互斥(同一帧二选一): 否则"回退"会被"继续积分"当场抵消, 等于没保护。
+        self.ac_learned -= self.ac_learned * (DT_MDL / self.AC_SAT_RELEASE_TAU)
+        if abs(self.ac_learned) <= self.AC_LEARN_LIMIT * self.AC_SAT_RELEASE_UNTIL:
+          self.ac_releasing = False
+          self.ac_sat_frames = 0
+        self.ac_learn_state = 1        # 沿用"学习中": 不新增 q 码, 免得读取端不认识
       elif self.ac_enabled >= 2 and curve_ok:
         # slow integrator removes steady-state bias (camera mount / steering bias)
         self.ac_learned = clamp(self.ac_learned + self.ac_error_filtered.x * (DT_MDL / self.AC_LEARN_TAU),

@@ -3337,13 +3337,12 @@ public:
         float adj_cm = 0.f;      // 当前施加的纠正(cm): 正 = 向右推
         float learn_cm = 0.f;    // 已学习的静态偏置(cm)
         int   state = 0;         // 0关 1低速 2无线 3宽异常 4变道 5干预 6已居中 7纠正中
-        int   learn_state = 0;   // 0未启用 1学习中 2弯道暂停 3测量暂停 4手动冻结
+        int   learn_state = 0;   // 0学习未启用/已暂停 1学习中 2弯道暂停 3测量暂停
         float lane_w = 0.f;
         bool  saturated = false; // 学习值已顶到上限
         // --- 2026-10-07 扩展段 ---
         float trip_min_cm = 0.f; // 本次行程(停车>60s 分割)学习值的最小/最大值(cm)
         float trip_max_cm = 0.f;
-        bool  frozen = false;    // 学习已被手动冻结
         float sat_res_cm = 0.f;  // 顶格期间残留的偏差(cm): 学到上限之后还剩这么多没补上
     };
 
@@ -3359,13 +3358,11 @@ public:
             info.state = s;       info.learn_state = q;  info.lane_w = w;
             info.saturated = (t != 0);
         }
-        // 扩展段(n/x/f/g)单独解析: 这样即使某天真跑在旧格式上, 上面那 7 个基本字段也不受影响
+        // 扩展段(n/x/g)单独解析: 这样即使某天真跑在旧格式上, 上面那 7 个基本字段也不受影响
         float n = 0.f, x = 0.f, g = 0.f;
-        int f = 0;
         const char* pe = strstr(p + 4, ",n=");
-        if (pe != nullptr && sscanf(pe + 1, "n=%f,x=%f,f=%d,g=%f", &n, &x, &f, &g) == 4) {
-            info.trip_min_cm = n;  info.trip_max_cm = x;
-            info.frozen = (f != 0); info.sat_res_cm = g;
+        if (pe != nullptr && sscanf(pe + 1, "n=%f,x=%f,g=%f", &n, &x, &g) == 3) {
+            info.trip_min_cm = n;  info.trip_max_cm = x;  info.sat_res_cm = g;
         }
         return info;
     }
@@ -3386,11 +3383,10 @@ public:
 
     static const char* acLearnText(int q) {
         switch (q) {
-            case 0:  return "未启用学习";
+            case 0:  return "学习已暂停";
             case 1:  return "学习中";
             case 2:  return "学习暂停-弯道";
             case 3:  return "学习暂停-测量";
-            case 4:  return "学习已冻结";
             default: return "待机";
         }
     }
@@ -3488,14 +3484,11 @@ public:
 
         // 行3 学习: 「顶格」在实测里不等于故障 —— 顶格时残留偏差有时只有 2cm、有时 9cm,
         //   所以不再用红色报警(红字会让人误判成"坏了"), 改成黄色 + 直接写出真正有判断价值的信息:
-        //   到上限时还差多少 / 已冻结 / 本次行程的漂移区间。
+        //   到上限时还差多少 / 本次行程的漂移区间。
         const float al = fabsf(ac.learn_cm);
         const char* ldir = (ac.learn_cm >= 0.f) ? "向右" : "向左";
         NVGcolor lcolor = COLOR_WHITE_ALPHA(210);
-        if (ac.frozen) {
-            snprintf(str, sizeof(str), "%s %.1fcm 已冻结", ldir, al);
-            lcolor = COLOR_WHITE_ALPHA(140);
-        } else if (ac.saturated) {
+        if (ac.saturated) {
             const float sg = fabsf(ac.sat_res_cm);
             if (sg >= 0.5f) {
                 snprintf(str, sizeof(str), "%s %.1fcm 到上限·还差%.1fcm", ldir, al, sg);

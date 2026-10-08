@@ -282,8 +282,6 @@ class LateralPlanner:
       ac_str = f"纠{'右' if a >= 0 else '左'}{abs(a):.0f}cm(学纠{'右' if l >= 0 else '左'}{abs(l):.0f}cm"
       if getattr(self.LP, "ac_saturated", False):
         ac_str += "顶"
-      if getattr(self.LP, "ac_learn_frozen", False):
-        ac_str += "冻"
       ac_str += ")"
     else:
       ac_str = "自动纠偏:关"
@@ -306,10 +304,10 @@ class LateralPlanner:
     # 供 UI 左下角「自动居中纠正记录」弹窗解析。UI 读本行时会把 [AC] 及之后整段剔除,
     # 所以底部那行现有显示内容一个字符都不会变; 本片段只是搭同一字段的车。
     # 格式: [AC]e=偏差cm,p=纠正cm,l=学习cm,s=状态码,q=学习码,w=车道宽m,t=学习饱和标志,
-    #           n=本次行程学习值最小cm,x=最大cm,f=学习已冻结,g=顶格时残留偏差cm
+    #           n=本次行程学习值最小cm,x=最大cm,g=顶格时残留偏差cm
     try:
       _LP = self.LP
-      ac_seg = " [AC]e=%.1f,p=%.1f,l=%.1f,s=%d,q=%d,w=%.2f,t=%d,n=%.1f,x=%.1f,f=%d,g=%.1f" % (
+      ac_seg = " [AC]e=%.1f,p=%.1f,l=%.1f,s=%d,q=%d,w=%.2f,t=%d,n=%.1f,x=%.1f,g=%.1f" % (
         float(getattr(_LP, "ac_error_now", 0.0)) * 100.0,
         float(getattr(_LP, "ac_applied", 0.0)) * 100.0,
         float(getattr(_LP, "ac_learned", 0.0)) * 100.0,
@@ -319,7 +317,6 @@ class LateralPlanner:
         1 if getattr(_LP, "ac_saturated", False) else 0,
         float(getattr(_LP, "ac_trip_learn_min", 0.0)) * 100.0,
         float(getattr(_LP, "ac_trip_learn_max", 0.0)) * 100.0,
-        1 if getattr(_LP, "ac_learn_frozen", False) else 0,
         float(getattr(_LP, "ac_sat_residual", 0.0)) * 100.0)
     except Exception:
       ac_seg = ""
